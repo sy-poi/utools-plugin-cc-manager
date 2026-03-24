@@ -56,7 +56,7 @@ pnpm build    # 构建到 dist/ 目录
 
 ### uTools 集成
 
-- `public/plugin.json` — 插件配置，feature code `sessions`，关键词"会话管理"
+- `public/plugin.json` — 插件配置，feature code `sessions`，关键词"CC会话管理"
 - 开发模式 `main` 指向 `http://localhost:5173`
 - `window.utools.dbStorage` 持久化用户设置（key: `terminalCommand`）
 - `window.utools.shellOpenPath()` 打开项目目录

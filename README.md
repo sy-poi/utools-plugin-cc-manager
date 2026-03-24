@@ -76,7 +76,7 @@
 2. 开发模式：`pnpm run dev`
 3. 构建：`pnpm run build`
 4. 在 uTools 开发者工具中加载 `public/plugin.json` 或 `dist` 目录
-5. 在 uTools 中输入「会话管理」启动插件
+5. 在 uTools 中输入「CC会话管理」启动插件
 
 ## 项目结构
 
