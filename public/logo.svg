@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#E07B4A"/>
+      <stop offset="100%" stop-color="#C45A2D"/>
+    </linearGradient>
+    <linearGradient id="bubble" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="rgba(255,255,255,0.95)"/>
+      <stop offset="100%" stop-color="rgba(255,255,255,0.85)"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 圆角背景 -->
+  <rect width="256" height="256" rx="48" fill="url(#bg)"/>
+
+  <!-- 主体：圆角矩形面板（会话列表） -->
+  <rect x="40" y="44" width="176" height="148" rx="16" fill="url(#bubble)"/>
+
+  <!-- 会话列表行 -->
+  <!-- 第一行（选中态，带颜色） -->
+  <rect x="56" y="60" width="144" height="24" rx="6" fill="#E8784A" opacity="0.18"/>
+  <circle cx="72" cy="72" r="6" fill="#E07B4A"/>
+  <rect x="86" y="68" width="80" height="8" rx="4" fill="#D06A3A"/>
+
+  <!-- 第二行 -->
+  <circle cx="72" cy="104" r="6" fill="#C4C4C4"/>
+  <rect x="86" y="100" width="96" height="8" rx="4" fill="#BDBDBD"/>
+
+  <!-- 第三行 -->
+  <circle cx="72" cy="136" r="6" fill="#C4C4C4"/>
+  <rect x="86" y="132" width="64" height="8" rx="4" fill="#BDBDBD"/>
+
+  <!-- 第四行（半透明，暗示更多） -->
+  <circle cx="72" cy="168" r="6" fill="#C4C4C4" opacity="0.4"/>
+  <rect x="86" y="164" width="72" height="8" rx="4" fill="#BDBDBD" opacity="0.4"/>
+
+  <!-- 右下角小气泡（代表 AI 会话） -->
+  <g transform="translate(168, 156)">
+    <path d="M0,8 C0,2 4,0 10,0 L52,0 C58,0 62,4 62,10 L62,38 C62,44 58,48 52,48 L20,48 L10,58 L10,48 C4,48 0,44 0,38 Z"
+          fill="#E07B4A" stroke="white" stroke-width="4"/>
+    <!-- 气泡内的省略号（代表对话） -->
+    <circle cx="18" cy="24" r="4" fill="white"/>
+    <circle cx="31" cy="24" r="4" fill="white"/>
+    <circle cx="44" cy="24" r="4" fill="white"/>
+  </g>
+</svg>
