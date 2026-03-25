@@ -1,5 +1,24 @@
 import { computed } from 'vue'
 
+/**
+ * 判断文本是否为系统生成内容（非用户手动输入）
+ * 系统消息以 [ 或 < 开头，如 [Request interrupted by user]、<tool_use_error>、<stdout> 等
+ * 注意：preload/services.js 中有同名函数，两处逻辑必须保持一致
+ */
+export function isSystemText(text) {
+  const t = (text || '').trimStart()
+  return t.startsWith('[') || t.startsWith('<')
+}
+
+/**
+ * 判断文本是否为可合并到 assistant 消息的工具级系统输出
+ * 仅 < 开头的消息（<tool_use_error>、<stdout> 等）属于工具输出，可合并
+ * [ 开头的消息（如 [Request interrupted by user]）是会话级事件，不合并
+ */
+function isToolSystemOutput(text) {
+  return (text || '').trimStart().startsWith('<')
+}
+
 // XML 标签解析
 const XML_TAG_LABELS = {
   'local-command-caveat': { label: '本地命令提示', style: 'caveat' },
@@ -222,7 +241,8 @@ export function useDisplayMessages(sessionContent) {
         const prevContent = prev.message?.content
         if (!Array.isArray(prevContent)) return false
         const lastBlock = prevContent[prevContent.length - 1]
-        return lastBlock && (lastBlock.type === 'tool_use' || lastBlock.type === 'tool_result')
+        if (!lastBlock || (lastBlock.type !== 'tool_use' && lastBlock.type !== 'tool_result')) return false
+        return blocks.every(b => isToolSystemOutput(b.text))
       })()
 
       if (merged.length > 0) {
@@ -231,11 +251,13 @@ export function useDisplayMessages(sessionContent) {
         if (role === 'assistant' && prevRole === 'assistant') {
           prev.message.content = [...(Array.isArray(prev.message.content) ? prev.message.content : []), ...blocks]
           if (msg.stop_reason) prev.message.stop_reason = msg.stop_reason
+          if (item.uuid) prev.lastUuid = item.uuid
           accumulateStats(prev, item)
           continue
         }
         if (isToolResponse && prevRole === 'assistant') {
           prev.message.content = [...(Array.isArray(prev.message.content) ? prev.message.content : []), ...blocks]
+          if (item.uuid) prev.lastUuid = item.uuid
           continue
         }
         if (isSystemInjection && prevRole === 'assistant') {
@@ -247,13 +269,19 @@ export function useDisplayMessages(sessionContent) {
             content: b.text || ''
           }))
           prev.message.content = [...prevContent, ...converted]
+          if (item.uuid) prev.lastUuid = item.uuid
           continue
         }
       }
       const initial = extractStats(item)
+      const isSystemEvent = role === 'user' && blocks.length > 0 && blocks.every(b => b.type === 'text' && isSystemText(b.text))
+      const systemEventType = isSystemEvent
+        ? (blocks.every(b => /^\[Request interrupted/.test((b.text || '').trimStart())) ? 'interrupt' : 'notify')
+        : undefined
       merged.push({
         ...item,
         message: { ...msg, content: [...blocks] },
+        ...(isSystemEvent ? { isSystemEvent: true, systemEventType } : {}),
         _stats: initial || { input_tokens: 0, output_tokens: 0, cache_creation: 0, cache_read: 0, model: '', stop_reason: '', durationMs: 0 }
       })
     }

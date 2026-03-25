@@ -179,29 +179,7 @@ function startFork(item) {
 function confirmFork(name) {
   const item = forkDialog.value.item
   const itemUuid = item.uuid
-  let cutoffUuid = itemUuid
-  const allItems = sessionContent.value
-  let found = false
-  for (let i = 0; i < allItems.length; i++) {
-    if (allItems[i].uuid === itemUuid) { found = true }
-    if (found) {
-      const t = allItems[i].type
-      const role = allItems[i].message?.role
-      if (i > 0 && allItems[i].uuid !== itemUuid) {
-        if (t === 'assistant' || (t === 'user' && role === 'user')) {
-          const content = allItems[i].message?.content
-          const isToolResult = Array.isArray(content) && content.every(b => b.type === 'tool_result')
-          const isSystemInject = t === 'user' && !isToolResult && Array.isArray(content) && content.every(b => b.type === 'text')
-          if (t === 'assistant' || isToolResult || isSystemInject) {
-            cutoffUuid = allItems[i].uuid
-            continue
-          }
-        }
-        break
-      }
-      cutoffUuid = allItems[i].uuid
-    }
-  }
+  const cutoffUuid = item.lastUuid || itemUuid
   const result = window.services.forkSession(selectedSession.value.path, cutoffUuid, name)
   if (result.success) {
     showSnackbar('Fork 成功')

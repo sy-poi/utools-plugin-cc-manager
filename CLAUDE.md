@@ -71,6 +71,21 @@ pnpm build    # 构建到 dist/ 目录
 ### 关键设计模式
 
 - Composables 中 `useSnackbar` 和 `useTheme` 使用模块级 `ref()` 实现跨组件单例共享状态
-- 消息合并逻辑：连续 assistant 消息、tool_result 响应、系统注入文本都会合并到前一个 assistant 消息中
+- 消息合并逻辑：连续 assistant 消息、tool_result 响应、系统注入文本都会合并到前一个 assistant 消息中。合并时在 merged message 上记录 `lastUuid`（最后一条被合并的原始 item 的 uuid），供 fork 等功能定位截断点
+- 系统注入判定：`isSystemText(text)` 函数判断文本是否为系统生成内容（以 `[` 或 `<` 开头）。该函数在 `preload/services.js` 和 `src/composables/useMessageParser.js` 中各有一份，修改时必须同步更新两处
 - 工具调用渲染：tool_use 与 tool_result 按 ID 配对，默认折叠，点击展开
 - Edit 工具的 diff 使用 LCS 算法 + 内联差异高亮，结果通过 WeakMap 缓存
+
+### 更新日志规范
+
+更新 `CHANGELOG.md` 时，按以下格式编写，保持简洁：
+
+```
+## vX.Y.Z
+
+1. 修复了xxx
+2. 新增了xxx
+3. 优化了xxx
+```
+
+每条一句话说明，不用分类标题，不用加粗或详细解释。

@@ -218,9 +218,50 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
         <div class="spinner"></div>
       </div>
       <template v-else-if="displayMessages.length > 0">
-        <div
-          v-for="item in displayMessages"
-          :key="item.uuid"
+        <template v-for="item in displayMessages" :key="item.uuid">
+        <!-- 系统事件：中断 → 分隔线，通知 → 气泡 -->
+        <div v-if="item.isSystemEvent && item.systemEventType === 'interrupt'" class="system-event">
+          <div class="system-event-line"></div>
+          <div class="system-event-content">
+            <IconStop :size="12" />
+            <span>用户中断了请求</span>
+            <span class="system-event-time">{{ formatTime(item.timestamp) }}</span>
+          </div>
+          <div class="system-event-line"></div>
+        </div>
+        <div v-else-if="item.isSystemEvent" class="message message-system-notify">
+          <div class="message-header">
+            <span class="role-badge role-system-notify">系统</span>
+            <span class="message-time">{{ formatTime(item.timestamp) }}</span>
+          </div>
+          <div class="message-blocks">
+            <template v-for="(block, idx) in mergeToolBlocks(parseContentBlocks(item))" :key="idx">
+              <template v-if="block.type === 'text'">
+                <template v-if="hasXmlTags(block.text)">
+                  <template v-for="(seg, si) in parseTextSegments(block.text)" :key="si">
+                    <div v-if="seg.type === 'plain'" class="block-text">{{ seg.text }}</div>
+                    <div v-else class="xml-tag-block" :class="'xml-' + seg.style">
+                      <span class="xml-tag-label">{{ seg.label }}</span>
+                      <span v-if="seg.text" class="xml-tag-content">{{ seg.text }}</span>
+                    </div>
+                  </template>
+                </template>
+                <div v-else class="block-text">{{ block.text }}</div>
+              </template>
+              <div v-else-if="block.type === 'tool_result'" class="tool-card">
+                <div class="tool-card-header clickable" @click="toggleCollapse(item.uuid + '-result-' + idx)">
+                  <span class="block-tag tag-result">Result</span>
+                  <span class="collapse-icon">{{ isCollapsed(item.uuid + '-result-' + idx) ? '▸' : '▾' }}</span>
+                </div>
+                <div v-if="!isCollapsed(item.uuid + '-result-' + idx)" class="tool-card-body">
+                  <div class="tool-card-section"><div class="tool-card-code">{{ block.content }}</div></div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+        <!-- 普通消息 -->
+        <div v-else
           class="message"
           :class="'message-' + getMessageRole(item)"
         >
@@ -235,7 +276,7 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
               <!-- 中断提示 -->
               <div v-if="block.type === 'text' && /^\[Request interrupted by user/.test(block.text)" class="block-interrupted">
                 <IconStop />
-                {{ block.text.replace(/[\[\]]/g, '') }}
+                用户中断了请求
               </div>
               <!-- 文本（可能包含 XML 标签） -->
               <template v-else-if="block.type === 'text'">
@@ -344,6 +385,7 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
             </button>
           </div>
         </div>
+        </template>
       </template>
       <div v-else class="empty-content">会话内容为空</div>
     </div>
@@ -559,6 +601,10 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
   background: rgba(0, 0, 0, 0.04);
   opacity: 0.6;
 }
+.message-system-notify {
+  background: rgba(255, 152, 0, 0.08);
+  border-left: 3px solid #ff9800;
+}
 :global(.dark .message-user) {
   background: rgba(144, 202, 249, 0.12);
 }
@@ -567,6 +613,10 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
 }
 :global(.dark .message-system) {
   background: rgba(255, 255, 255, 0.05);
+}
+:global(.dark .message-system-notify) {
+  background: rgba(255, 152, 0, 0.1);
+  border-left-color: rgba(255, 152, 0, 0.6);
 }
 
 .message-header {
@@ -593,10 +643,14 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
   background: #444;
   color: #e0e0e0;
 }
-.role-badge:not(.role-user):not(.role-assistant) {
+.role-system-notify {
+  background: #ff9800;
+  color: #fff;
+}
+.role-badge:not(.role-user):not(.role-assistant):not(.role-system-notify) {
   background: rgba(0,0,0,0.1);
 }
-:global(.dark .role-badge:not(.role-user):not(.role-assistant)) {
+:global(.dark .role-badge:not(.role-user):not(.role-assistant):not(.role-system-notify)) {
   background: rgba(255,255,255,0.15);
 }
 .message-time {
@@ -860,6 +914,44 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
   transition: opacity 0.15s;
 }
 .inline-image:hover { opacity: 0.85; }
+
+/* System events (interruptions, notifications) */
+.system-event {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0;
+  user-select: none;
+}
+.system-event-line {
+  flex: 1;
+  height: 1px;
+  background: rgba(0, 0, 0, 0.08);
+}
+:global(.dark .system-event-line) {
+  background: rgba(255, 255, 255, 0.08);
+}
+.system-event-content {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #e65100;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+:global(.dark .system-event-content) {
+  color: #ffb74d;
+}
+.system-event-text {
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.system-event-time {
+  opacity: 0.5;
+  font-size: 11px;
+}
 
 .block-interrupted {
   display: flex;

@@ -3,6 +3,16 @@ const path = require('node:path')
 const os = require('node:os')
 const { exec } = require('node:child_process')
 
+/**
+ * 判断文本是否为系统注入内容（非用户手动输入）
+ * 系统注入消息以 [ 或 < 开头，如 [Request interrupted by user]、<tool_use_error>、<stdout> 等
+ * 注意：src/composables/useMessageParser.js 中有同名函数，两处逻辑必须保持一致
+ */
+function isSystemText(text) {
+  const t = (text || '').trimStart()
+  return t.startsWith('[') || t.startsWith('<')
+}
+
 function getProjectsPath() {
   return path.join(os.homedir(), '.claude', 'projects')
 }
@@ -38,15 +48,16 @@ function extractSessionName(items, fallbackName) {
         if (block.type === 'text' && block.text) { text = block.text; break }
       }
     }
-    // 提取命令名作为候选
-    const cmdMatch = text.match(/<command-name>([^<]+)<\/command-name>/)
-    if (cmdMatch) { text = cmdMatch[1].trim() }
-    // 跳过以 XML 标签开头的非命令消息（stdout、caveat 等）
-    else if (text.trimStart().startsWith('<')) continue
+    // 跳过系统注入消息
+    if (isSystemText(text)) {
+      // 但保留 <command-name>xxx</command-name> 中的命令名
+      const cmdMatch = text.match(/<command-name>([^<]+)<\/command-name>/)
+      if (!cmdMatch) continue
+      text = cmdMatch[1].trim()
+    }
     // 去除可能残留的 XML 标签
     text = text.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
     if (!text) continue
-    if (/^\[Request interrupted/.test(text)) continue
     if (text) return text.length > 50 ? text.slice(0, 50) + '...' : text
   }
   return fallbackName
