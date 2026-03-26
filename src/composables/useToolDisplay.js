@@ -129,11 +129,13 @@ export function getDiff(block) {
 // Collapse state management
 export function useCollapse() {
   const collapsedBlocks = ref({})
+  const forceExpand = ref(false)
   function toggleCollapse(key) {
     collapsedBlocks.value[key] = !(collapsedBlocks.value[key] ?? true)
   }
   function isCollapsed(key) {
+    if (forceExpand.value) return false
     return collapsedBlocks.value[key] ?? true
   }
-  return { collapsedBlocks, toggleCollapse, isCollapsed }
+  return { collapsedBlocks, toggleCollapse, isCollapsed, forceExpand }
 }

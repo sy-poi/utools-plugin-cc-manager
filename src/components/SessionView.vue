@@ -1,6 +1,6 @@
 <script setup>
 import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { IconTerminal, IconCopy, IconFork, IconStop, IconChevronUp, IconChevronDown, IconChat, IconSearch, IconClose, IconExport, IconImage } from './icons'
+import { IconTerminal, IconCopy, IconFork, IconStop, IconChevronUp, IconChevronDown, IconChat, IconSearch, IconClose, IconExport, IconImage, IconFolder, IconMore, IconStar, IconStarOutline, IconEdit, IconDelete } from './icons'
 import { formatTime } from '../composables/useFormat'
 import { parseContentBlocks, mergeToolBlocks, getMessageRole, getRoleLabel, hasXmlTags, parseTextSegments } from '../composables/useMessageParser'
 import { formatToolInput, getToolSummary, getDiff } from '../composables/useToolDisplay'
@@ -8,7 +8,7 @@ import { useCollapse } from '../composables/useToolDisplay'
 import { useSnackbar } from '../composables/useSnackbar'
 import { renderMarkdown } from '../composables/useMarkdown'
 import { useSearch } from '../composables/useSearch'
-import { exportAsMarkdown, exportAsHtml } from '../composables/useExport'
+import { exportAsMarkdown, serializeToHtml } from '../composables/useExport'
 import { useTheme } from '../composables/useTheme'
 import ExportOptionsDialog from './ExportOptionsDialog.vue'
 
@@ -18,21 +18,47 @@ const props = defineProps({
   loading: Boolean
 })
 
-const emit = defineEmits(['fork', 'resume', 'preview-image'])
+const emit = defineEmits(['fork', 'resume', 'preview-image', 'rename', 'delete', 'toggle-favorite'])
 
 const { showSnackbar } = useSnackbar()
-const { toggleCollapse, isCollapsed } = useCollapse()
+const { toggleCollapse, isCollapsed, forceExpand } = useCollapse()
 const { isDark } = useTheme()
-const { searchVisible, searchText, matchIndex, matchCount, openSearch, closeSearch, doSearch, nextMatch, prevMatch } = useSearch()
+const { searchVisible, searchText, matchIndex, matchCount, caseSensitive, wholeWord, useRegex, openSearch, closeSearch, doSearch, nextMatch, prevMatch } = useSearch()
+const searchInputRef = ref(null)
+
+// Auto-focus search input when opened
+watch(searchVisible, (v) => {
+  if (v) nextTick(() => searchInputRef.value?.focus())
+})
+
+// Global keyboard shortcuts
+function onKeyDown(e) {
+  if (!props.session) return
+  if (e.ctrlKey && e.key === 'f') {
+    e.preventDefault()
+    openSearch()
+  } else if (e.key === 'F3') {
+    e.preventDefault()
+    if (!searchVisible.value) openSearch()
+    else if (e.shiftKey) prevMatch()
+    else nextMatch()
+  } else if (e.key === 'Escape' && searchVisible.value) {
+    closeSearch()
+  }
+}
+onMounted(() => document.addEventListener('keydown', onKeyDown))
+onUnmounted(() => document.removeEventListener('keydown', onKeyDown))
 
 const contentBodyRef = ref(null)
-const showExportMenu = ref(false)
+const showMoreMenu = ref(false)
+const showShareMenu = ref(false)
 const exportDialog = ref({ show: false, format: '' })
 
-// Close export menu on click outside
+// Close menus on click outside
 function onDocClick(e) {
-  if (showExportMenu.value && !e.target.closest('.export-wrapper')) {
-    showExportMenu.value = false
+  if (showMoreMenu.value && !e.target.closest('.more-wrapper')) {
+    showMoreMenu.value = false
+    showShareMenu.value = false
   }
 }
 onMounted(() => document.addEventListener('click', onDocClick))
@@ -76,9 +102,31 @@ function copyMessageText(item) {
   }
 }
 
+function copyResumeCommand() {
+  const session = props.session
+  if (!session?.sessionId) return
+  const command = window.utools.dbStorage.getItem('terminalCommand') || 'claude'
+  const cmd = `${command} --resume ${session.sessionId}`
+  window.utools.copyText(cmd)
+  showSnackbar('已复制恢复命令')
+}
+
+function openSessionDir() {
+  showMoreMenu.value = false
+  const session = props.session
+  if (!session?.path) return
+  window.utools.shellShowItemInFolder(session.path)
+}
+
+function confirmDelete() {
+  showMoreMenu.value = false
+  emit('delete', props.session)
+}
+
 // Export functions
 function doExport(format) {
-  showExportMenu.value = false
+  showMoreMenu.value = false
+  showShareMenu.value = false
   const session = props.session
   const msgs = props.displayMessages
   if (!session || !msgs.length) return
@@ -92,6 +140,94 @@ function doExport(format) {
   }
 }
 
+/**
+ * Shared: clone preview DOM, apply export options, wrap in offscreen container.
+ * Used by both HTML and image export.
+ */
+async function prepareExportClone(session, opts) {
+  const source = contentBodyRef.value
+  if (!source) return null
+
+  // For HTML export, always expand all blocks (user can toggle in the HTML file)
+  // For image export, only expand if explicitly requested
+  const isHtml = exportDialog.value.format === 'html'
+  const needExpand = isHtml || opts.showToolDetail || opts.showThinking
+  if (needExpand) {
+    forceExpand.value = true
+    await nextTick()
+  }
+
+  const clone = source.cloneNode(true)
+  if (needExpand) forceExpand.value = false
+
+  // Strip interactive-only elements
+  clone.querySelectorAll('.message-actions').forEach(el => el.remove())
+  clone.querySelectorAll('.scroll-buttons').forEach(el => el.remove())
+  clone.querySelectorAll('.search-highlight').forEach(el => {
+    el.replaceWith(document.createTextNode(el.textContent))
+  })
+
+  // Apply export options
+  if (!opts.showStats) clone.querySelectorAll('.message-stats').forEach(el => el.remove())
+
+  if (isHtml) {
+    // HTML: keep all blocks, but default them to collapsed (user can click to expand)
+    clone.querySelectorAll('.tool-card-body, .block-body').forEach(el => {
+      el.style.display = 'none'
+    })
+    clone.querySelectorAll('.collapse-icon').forEach(el => {
+      el.textContent = '▸'
+    })
+  } else {
+    // Image: remove blocks based on options
+    if (!opts.showThinking) clone.querySelectorAll('.block-thinking').forEach(el => el.remove())
+    if (!opts.showToolDetail) clone.querySelectorAll('.tool-card-body').forEach(el => el.remove())
+  }
+
+  // Handle file path mode
+  if (opts.filePathMode === 'hidden') {
+    clone.querySelectorAll('.tool-summary').forEach(el => { el.textContent = '' })
+  } else if (opts.filePathMode === 'full') {
+    clone.querySelectorAll('.tool-summary').forEach(el => {
+      const fullPath = el.getAttribute('data-full-path')
+      if (fullPath) el.textContent = fullPath
+    })
+  }
+
+  // Build offscreen container
+  const container = document.createElement('div')
+  container.style.cssText = 'position:fixed;left:-9999px;top:0;width:860px;z-index:-1;overflow:visible;'
+  if (isDark.value) container.classList.add('dark')
+  container.style.background = isDark.value ? '#1a1a1a' : '#f8f9fa'
+  container.style.color = isDark.value ? '#e0e0e0' : '#1a1a1a'
+  container.style.fontFamily = "system-ui, -apple-system, 'Segoe UI', sans-serif"
+  container.style.padding = '16px'
+
+  // Insert session title/meta at top
+  const titleDiv = document.createElement('div')
+  titleDiv.style.cssText = 'font-size:20px;font-weight:700;margin-bottom:4px;'
+  titleDiv.textContent = session.name || 'Session'
+  container.appendChild(titleDiv)
+  const metaParts = []
+  if (opts.showSessionId && session.sessionId) metaParts.push(session.sessionId)
+  if (opts.showCwd && session.cwd) metaParts.push(session.cwd)
+  if (metaParts.length) {
+    const metaDiv = document.createElement('div')
+    metaDiv.style.cssText = 'font-size:12px;opacity:0.5;margin-bottom:16px;'
+    metaDiv.textContent = metaParts.join(' · ')
+    container.appendChild(metaDiv)
+  }
+
+  // Reset clone styles
+  clone.style.overflow = 'visible'
+  clone.style.height = 'auto'
+  clone.style.maxHeight = 'none'
+  clone.style.flex = 'none'
+  container.appendChild(clone)
+
+  return container
+}
+
 function doExportWithOptions(opts) {
   const format = exportDialog.value.format
   exportDialog.value.show = false
@@ -100,35 +236,41 @@ function doExportWithOptions(opts) {
   if (!session || !msgs.length) return
 
   if (format === 'html') {
-    const content = exportAsHtml(msgs, session, isDark.value, opts)
-    const filePath = window.services.saveText(content, `${session.name || 'session'}.html`)
-    if (filePath) { window.utools.shellShowItemInFolder(filePath); showSnackbar('已导出 HTML') }
+    showSnackbar('正在生成 HTML...')
+    nextTick(async () => {
+      try {
+        const container = await prepareExportClone(session, opts)
+        if (!container) return
+        document.body.appendChild(container)
+        await new Promise(r => setTimeout(r, 100))
+        const htmlContent = serializeToHtml(container, session.name || 'Session', isDark.value)
+        document.body.removeChild(container)
+        const filePath = window.services.saveText(htmlContent, `${session.name || 'session'}.html`)
+        if (filePath) { window.utools.shellShowItemInFolder(filePath); showSnackbar('已导出 HTML') }
+      } catch (e) {
+        console.error('Export HTML failed:', e)
+        showSnackbar('导出 HTML 失败: ' + e.message, 'error')
+      }
+    })
   } else if (format === 'image') {
     showSnackbar('正在生成长图...')
     nextTick(async () => {
       try {
-        const htmlContent = exportAsHtml(msgs, session, false, opts)
-        const container = document.createElement('div')
-        container.style.cssText = 'position:fixed;left:-9999px;top:0;width:860px;z-index:-1;'
-        const iframe = document.createElement('iframe')
-        iframe.style.cssText = 'width:860px;border:none;'
-        container.appendChild(iframe)
+        const container = await prepareExportClone(session, opts)
+        if (!container) return
         document.body.appendChild(container)
 
-        await new Promise(resolve => { iframe.onload = resolve; iframe.srcdoc = htmlContent })
-        await new Promise(r => setTimeout(r, 500))
+        await new Promise(r => setTimeout(r, 200))
 
-        const body = iframe.contentDocument.body
-        const totalHeight = body.scrollHeight
+        const totalHeight = container.scrollHeight
         const width = 860
-        iframe.style.height = totalHeight + 'px'
 
         const html2canvas = (await import('html2canvas')).default
         const MAX_SLICE = 8000
         const sliceCount = Math.ceil(totalHeight / MAX_SLICE)
 
         if (sliceCount <= 1) {
-          const canvas = await html2canvas(body, { useCORS: true, scale: 2, logging: false, width, height: totalHeight, windowWidth: width, windowHeight: totalHeight })
+          const canvas = await html2canvas(container, { useCORS: true, scale: 2, logging: false, width, height: totalHeight, windowWidth: width, windowHeight: totalHeight })
           document.body.removeChild(container)
           saveCanvasAsImage(canvas)
         } else {
@@ -139,7 +281,7 @@ function doExportWithOptions(opts) {
           for (let i = 0; i < sliceCount; i++) {
             const y = i * MAX_SLICE
             const h = Math.min(MAX_SLICE, totalHeight - y)
-            const sliceCanvas = await html2canvas(body, { useCORS: true, scale: 2, logging: false, width, height: h, windowWidth: width, windowHeight: h, x: 0, y })
+            const sliceCanvas = await html2canvas(container, { useCORS: true, scale: 2, logging: false, width, height: h, windowWidth: width, windowHeight: h, x: 0, y })
             ctx.drawImage(sliceCanvas, 0, y * 2)
           }
           document.body.removeChild(container)
@@ -173,25 +315,54 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
   <template v-if="session">
     <div class="content-header">
       <div class="content-header-top">
+        <button class="resume-btn" @click="emit('toggle-favorite', session)" :title="session.isFavorite ? '取消收藏' : '收藏'">
+          <IconStar v-if="session.isFavorite" :size="14" style="color: #ff9800" />
+          <IconStarOutline v-else :size="14" />
+        </button>
         <h3>{{ session.name }}</h3>
+        <button class="resume-btn" @click="emit('rename', session)" title="重命名">
+          <IconEdit :size="13" />
+        </button>
       </div>
       <div class="content-header-sub">
         <span class="content-cwd">{{ session.sessionId || session.cwd }}</span>
         <button v-if="session.sessionId" class="resume-btn" @click="emit('resume')" title="在终端中恢复会话">
           <IconTerminal />
         </button>
+        <button v-if="session.sessionId" class="resume-btn" @click="copyResumeCommand" title="复制恢复命令">
+          <IconCopy :size="13" />
+        </button>
         <div style="flex:1"></div>
         <button class="header-action-btn" @click="openSearch" title="搜索 (Ctrl+F)">
           <IconSearch :size="14" />
         </button>
-        <div class="export-wrapper">
-          <button class="header-action-btn" @click="showExportMenu = !showExportMenu" title="导出">
-            <IconExport :size="14" />
+        <div class="more-wrapper">
+          <button class="header-action-btn" @click="showMoreMenu = !showMoreMenu" title="更多">
+            <IconMore :size="14" />
           </button>
-          <div v-if="showExportMenu" class="export-menu">
-            <button @click="doExport('md')">导出 Markdown</button>
-            <button @click="doExport('html')">导出 HTML</button>
-            <button @click="doExport('image')">导出长图</button>
+          <div v-if="showMoreMenu" class="more-menu">
+            <button @click="openSessionDir">
+              <IconFolder :size="13" />
+              <span>打开源文件目录</span>
+            </button>
+            <div class="menu-divider"></div>
+            <div class="menu-sub-wrapper" @mouseenter="showShareMenu = true" @mouseleave="showShareMenu = false">
+              <button class="menu-sub-trigger">
+                <IconExport :size="13" />
+                <span>分享</span>
+                <span class="menu-arrow">▸</span>
+              </button>
+              <div v-if="showShareMenu" class="menu-sub">
+                <button @click="doExport('md')">导出 Markdown</button>
+                <button @click="doExport('html')">导出 HTML</button>
+                <button @click="doExport('image')">导出长图</button>
+              </div>
+            </div>
+            <div class="menu-divider"></div>
+            <button class="menu-danger" @click="confirmDelete">
+              <IconDelete :size="13" />
+              <span>删除会话</span>
+            </button>
           </div>
         </div>
       </div>
@@ -203,15 +374,19 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
         v-model="searchText"
         placeholder="搜索内容..."
         @input="doSearch"
-        @keyup.enter="nextMatch"
+        @keyup.enter.exact="nextMatch"
+        @keyup.enter.shift="prevMatch"
         @keyup.escape="closeSearch"
         ref="searchInputRef"
       />
+      <button class="search-opt-btn" :class="{ active: caseSensitive }" @click="caseSensitive = !caseSensitive; doSearch()" title="区分大小写">Aa</button>
+      <button class="search-opt-btn" :class="{ active: wholeWord }" @click="wholeWord = !wholeWord; doSearch()" title="全字匹配">Ab|</button>
+      <button class="search-opt-btn" :class="{ active: useRegex }" @click="useRegex = !useRegex; doSearch()" title="正则表达式">.*</button>
       <span v-if="matchCount > 0" class="search-count">{{ matchIndex + 1 }}/{{ matchCount }}</span>
       <span v-else-if="searchText" class="search-count">0</span>
-      <button class="search-nav-btn" @click="prevMatch" title="上一个">▲</button>
-      <button class="search-nav-btn" @click="nextMatch" title="下一个">▼</button>
-      <button class="search-nav-btn" @click="closeSearch" title="关闭"><IconClose :size="14" /></button>
+      <button class="search-nav-btn" @click="prevMatch" title="上一个 (Shift+F3)">▲</button>
+      <button class="search-nav-btn" @click="nextMatch" title="下一个 (F3)">▼</button>
+      <button class="search-nav-btn" @click="closeSearch" title="关闭 (Esc)"><IconClose :size="14" /></button>
     </div>
     <div class="content-body" ref="contentBodyRef">
       <div v-if="loading" class="loading">
@@ -263,11 +438,11 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
         <!-- 普通消息 -->
         <div v-else
           class="message"
-          :class="'message-' + getMessageRole(item)"
+          :class="[('message-' + getMessageRole(item)), { 'message-api-error': item.isApiErrorMessage }]"
         >
           <div class="message-header">
-            <span class="role-badge" :class="'role-' + getMessageRole(item)">
-              {{ getRoleLabel(getMessageRole(item)) }}
+            <span class="role-badge" :class="item.isApiErrorMessage ? 'role-error' : ('role-' + getMessageRole(item))">
+              {{ item.isApiErrorMessage ? '错误' : getRoleLabel(getMessageRole(item)) }}
             </span>
             <span class="message-time">{{ formatTime(item.timestamp) }}</span>
           </div>
@@ -303,11 +478,20 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
                 <div v-if="!isCollapsed(item.uuid + '-thinking-' + idx)" class="block-body">{{ block.text }}</div>
               </div>
 
+              <!-- 命令注入提示词（isMeta），默认折叠 -->
+              <div v-else-if="block.type === 'meta'" class="block-thinking">
+                <div class="block-header clickable" @click="toggleCollapse(item.uuid + '-meta-' + idx)">
+                  <span class="block-tag tag-meta">Prompt</span>
+                  <span class="collapse-icon">{{ isCollapsed(item.uuid + '-meta-' + idx) ? '▸' : '▾' }}</span>
+                </div>
+                <div v-if="!isCollapsed(item.uuid + '-meta-' + idx)" class="block-body">{{ block.text }}</div>
+              </div>
+
               <!-- 工具调用（含结果） -->
               <div v-else-if="block.type === 'tool_call'" class="tool-card" :class="{ 'tool-error': block.isError }">
                 <div class="tool-card-header clickable" @click="toggleCollapse(item.uuid + '-tool-' + idx)">
                   <span class="block-tag" :class="block.isError ? 'tag-error' : 'tag-tool'">{{ block.name }}</span>
-                  <span v-if="getToolSummary(block.name, block.input)" class="tool-summary">{{ getToolSummary(block.name, block.input) }}</span>
+                  <span v-if="getToolSummary(block.name, block.input)" class="tool-summary" :data-full-path="block.input?.file_path || block.input?.path || ''">{{ getToolSummary(block.name, block.input) }}</span>
                   <span class="collapse-icon">{{ isCollapsed(item.uuid + '-tool-' + idx) ? '▸' : '▾' }}</span>
                 </div>
                 <div v-if="!isCollapsed(item.uuid + '-tool-' + idx)" class="tool-card-body">
@@ -485,10 +669,10 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
 :global(.dark .header-action-btn:hover) {
   background: rgba(255,255,255,0.08);
 }
-.export-wrapper {
+.more-wrapper {
   position: relative;
 }
-.export-menu {
+.more-menu {
   position: absolute;
   right: 0;
   top: 100%;
@@ -497,17 +681,20 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
   border: 1px solid #e0e0e0;
   border-radius: 6px;
   box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-  overflow: hidden;
-  min-width: 140px;
+  overflow: visible;
+  min-width: 160px;
+  padding: 4px 0;
 }
-:global(.dark .export-menu) {
+:global(.dark .more-menu) {
   background: #2a2a2a;
   border-color: #444;
 }
-.export-menu button {
-  display: block;
+.more-menu button, .menu-sub-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
-  padding: 8px 14px;
+  padding: 7px 14px;
   border: none;
   background: none;
   color: inherit;
@@ -515,10 +702,60 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
   text-align: left;
   cursor: pointer;
 }
-.export-menu button:hover {
+.more-menu button:hover, .menu-sub-trigger:hover {
   background: rgba(0,0,0,0.04);
 }
-:global(.dark .export-menu button:hover) {
+:global(.dark .more-menu button:hover), :global(.dark .menu-sub-trigger:hover) {
+  background: rgba(255,255,255,0.06);
+}
+.menu-danger { color: #d32f2f !important; }
+:global(.dark .menu-danger) { color: #ef9a9a !important; }
+.menu-divider {
+  height: 1px;
+  background: rgba(0,0,0,0.08);
+  margin: 4px 0;
+}
+:global(.dark .menu-divider) {
+  background: rgba(255,255,255,0.08);
+}
+.menu-sub-wrapper {
+  position: relative;
+}
+.menu-arrow {
+  margin-left: auto;
+  font-size: 11px;
+  opacity: 0.5;
+}
+.menu-sub {
+  position: absolute;
+  right: 100%;
+  top: -4px;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+  min-width: 140px;
+  padding: 4px 0;
+}
+:global(.dark .menu-sub) {
+  background: #2a2a2a;
+  border-color: #444;
+}
+.menu-sub button {
+  display: block;
+  width: 100%;
+  padding: 7px 14px;
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.menu-sub button:hover {
+  background: rgba(0,0,0,0.04);
+}
+:global(.dark .menu-sub button:hover) {
   background: rgba(255,255,255,0.06);
 }
 
@@ -578,6 +815,37 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
   opacity: 1;
   background: rgba(0,0,0,0.06);
 }
+.search-opt-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  background: none;
+  border-radius: 3px;
+  cursor: pointer;
+  color: inherit;
+  opacity: 0.4;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+}
+.search-opt-btn:hover {
+  opacity: 0.7;
+  background: rgba(0,0,0,0.04);
+}
+.search-opt-btn.active {
+  opacity: 1;
+  color: #1976d2;
+  border-color: #1976d2;
+  background: rgba(25,118,210,0.08);
+}
+:global(.dark .search-opt-btn.active) {
+  color: #90caf9;
+  border-color: #90caf9;
+  background: rgba(144,202,249,0.12);
+}
 
 .content-body {
   flex: 1;
@@ -617,6 +885,26 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
 :global(.dark .message-system-notify) {
   background: rgba(255, 152, 0, 0.1);
   border-left-color: rgba(255, 152, 0, 0.6);
+}
+.message-api-error {
+  background: rgba(211, 47, 47, 0.06);
+  border-left: 3px solid #d32f2f;
+}
+.message-api-error .block-text,
+.message-api-error .md-content {
+  color: #d32f2f;
+}
+:global(.dark .message-api-error) {
+  background: rgba(239, 154, 154, 0.08);
+  border-left-color: #ef9a9a;
+}
+:global(.dark .message-api-error .block-text),
+:global(.dark .message-api-error .md-content) {
+  color: #ef9a9a;
+}
+.role-error {
+  background: #d32f2f;
+  color: #fff;
 }
 
 .message-header {
@@ -765,10 +1053,12 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
 .tag-tool { color: #546e7a; border-color: #90a4ae; background: rgba(84,110,122,0.06); }
 .tag-result { color: #558b2f; border-color: #aed581; background: rgba(85,139,47,0.06); }
 .tag-error { color: #d32f2f; border-color: #ef9a9a; background: rgba(211,47,47,0.06); }
+.tag-meta { color: #7b1fa2; border-color: #ce93d8; background: rgba(156,39,176,0.08); }
 :global(.dark .tag-thinking) { color: #90a4ae; border-color: #546e7a; background: rgba(144,164,174,0.1); }
 :global(.dark .tag-tool) { color: #b0bec5; border-color: #546e7a; background: rgba(176,190,197,0.08); }
 :global(.dark .tag-result) { color: #a5d6a7; border-color: #4a6e4b; background: rgba(165,214,167,0.08); }
 :global(.dark .tag-error) { color: #ef9a9a; border-color: #7a3333; background: rgba(239,154,154,0.1); }
+:global(.dark .tag-meta) { color: #ce93d8; border-color: #7b1fa2; background: rgba(206,147,216,0.1); }
 
 .block-body {
   margin-top: 4px;

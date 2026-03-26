@@ -34,11 +34,19 @@ watch(() => props.show, (v) => {
             <input type="checkbox" v-model="options.showStats" />
             <span>显示模型、用量、耗时等信息</span>
           </label>
-          <label class="option-item">
+          <label v-if="format === 'image'" class="option-item">
             <input type="checkbox" v-model="options.showToolDetail" />
             <span>展开工具调用详情</span>
           </label>
-          <label class="option-item">
+          <div class="option-item">
+            <span>工具文件路径</span>
+            <select v-model="options.filePathMode" class="option-select">
+              <option value="short">缩略路径</option>
+              <option value="full">完整路径</option>
+              <option value="hidden">不显示</option>
+            </select>
+          </div>
+          <label v-if="format === 'image'" class="option-item">
             <input type="checkbox" v-model="options.showThinking" />
             <span>显示 Thinking 思考过程</span>
           </label>
@@ -96,6 +104,20 @@ watch(() => props.show, (v) => {
   height: 16px;
   accent-color: #1976d2;
   cursor: pointer;
+}
+.option-select {
+  margin-left: auto;
+  padding: 3px 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 12px;
+  background: inherit;
+  color: inherit;
+  cursor: pointer;
+  outline: none;
+}
+:global(.dark .option-select) {
+  border-color: #555;
 }
 .dialog-actions {
   display: flex;

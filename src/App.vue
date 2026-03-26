@@ -37,7 +37,7 @@ const sidebarRef = ref(null)
 
 // Dialog state
 const renameDialog = ref({ show: false, session: null })
-const deleteConfirm = ref({ show: false, session: null })
+const deleteConfirm = ref({ show: false, session: null, showHint: true })
 const batchDeleteConfirm = ref({ show: false, paths: [] })
 const forkDialog = ref({ show: false, item: null })
 const imagePreview = ref({ show: false, src: '', mediaType: '' })
@@ -109,10 +109,10 @@ function refresh() {
 
 // Delete
 function handleDelete(session, event) {
-  if (event.ctrlKey || event.metaKey) {
+  if (event?.ctrlKey || event?.metaKey) {
     doDelete(session)
   } else {
-    deleteConfirm.value = { show: true, session }
+    deleteConfirm.value = { show: true, session, showHint: !!event }
   }
 }
 
@@ -202,6 +202,16 @@ function resumeSession() {
   }
 }
 
+// Toggle favorite from SessionView
+function toggleFavoriteFromView(session) {
+  if (!session?.path) return
+  const result = window.services.toggleFavorite(session.path)
+  if (result.success) {
+    session.isFavorite = result.isFavorite
+    loadProjects()
+  }
+}
+
 // Image preview
 function openImagePreview(src, mediaType) {
   imagePreview.value = { show: true, src, mediaType }
@@ -257,6 +267,9 @@ onMounted(() => {
         @fork="startFork"
         @resume="resumeSession"
         @preview-image="openImagePreview"
+        @rename="startRename"
+        @delete="handleDelete"
+        @toggle-favorite="toggleFavoriteFromView"
       />
     </main>
 
@@ -271,6 +284,7 @@ onMounted(() => {
     <DeleteConfirmDialog
       :show="deleteConfirm.show"
       :session="deleteConfirm.session"
+      :show-hint="deleteConfirm.showHint"
       @confirm="doDelete(deleteConfirm.session)"
       @cancel="deleteConfirm.show = false"
     />
