@@ -1,10 +1,15 @@
-import { ref, computed, watch } from 'vue'
+import { ref } from 'vue'
 
 export function useSearch() {
   const searchVisible = ref(false)
   const searchText = ref('')
   const matchIndex = ref(0)
   const matchCount = ref(0)
+
+  // Search options
+  const caseSensitive = ref(false)
+  const wholeWord = ref(false)
+  const useRegex = ref(false)
 
   function openSearch() {
     searchVisible.value = true
@@ -26,18 +31,40 @@ export function useSearch() {
     matchIndex.value = 0
   }
 
+  function buildRegex(query) {
+    if (!query) return null
+    let pattern
+    if (useRegex.value) {
+      try { pattern = query } catch { return null }
+    } else {
+      pattern = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    }
+    if (wholeWord.value) {
+      pattern = `\\b${pattern}\\b`
+    }
+    const flags = caseSensitive.value ? 'g' : 'gi'
+    try { return new RegExp(`(${pattern})`, flags) } catch { return null }
+  }
+
   function doSearch() {
     clearHighlights()
     const query = searchText.value.trim()
     if (!query) return
 
+    const regex = buildRegex(query)
+    if (!regex) return
+
     const container = document.querySelector('.content-body')
     if (!container) return
+
+    // Test function for text node pre-filter
+    const testRegex = new RegExp(regex.source, regex.flags)
 
     const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
     const textNodes = []
     while (walker.nextNode()) {
-      if (walker.currentNode.textContent.toLowerCase().includes(query.toLowerCase())) {
+      testRegex.lastIndex = 0
+      if (testRegex.test(walker.currentNode.textContent)) {
         textNodes.push(walker.currentNode)
       }
     }
@@ -45,21 +72,22 @@ export function useSearch() {
     let count = 0
     for (const node of textNodes) {
       const text = node.textContent
-      const regex = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi')
-      const parts = text.split(regex)
+      const splitRegex = new RegExp(regex.source, regex.flags)
+      const parts = text.split(splitRegex)
       if (parts.length <= 1) continue
 
       const fragment = document.createDocumentFragment()
-      for (const part of parts) {
-        if (part.toLowerCase() === query.toLowerCase()) {
+      for (let i = 0; i < parts.length; i++) {
+        // Odd indices are captured matches from split with capturing group
+        if (i % 2 === 1) {
           const span = document.createElement('span')
           span.className = 'search-highlight'
           span.dataset.matchIndex = count
-          span.textContent = part
+          span.textContent = parts[i]
           fragment.appendChild(span)
           count++
-        } else {
-          fragment.appendChild(document.createTextNode(part))
+        } else if (parts[i]) {
+          fragment.appendChild(document.createTextNode(parts[i]))
         }
       }
       node.parentNode.replaceChild(fragment, node)
@@ -92,6 +120,7 @@ export function useSearch() {
 
   return {
     searchVisible, searchText, matchIndex, matchCount,
+    caseSensitive, wholeWord, useRegex,
     openSearch, closeSearch, doSearch, nextMatch, prevMatch
   }
 }
