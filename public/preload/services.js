@@ -37,23 +37,28 @@ function extractSessionName(items, fallbackName) {
     const msg = data.message
     if (!msg) continue
     const msgContent = msg.content
-    // 跳过只含 tool_result 的消息
-    if (Array.isArray(msgContent) && msgContent.every(b => b.type === 'tool_result')) continue
+    // 跳过工具响应消息（含 tool_result 块、sourceToolUseID 或 sourceToolAssistantUUID）
+    if (Array.isArray(msgContent) && msgContent.some(b => b.type === 'tool_result')) continue
+    if (data.sourceToolUseID || data.sourceToolAssistantUUID) continue
+    // 跳过 isMeta 命令注入消息（如 /init 注入的详细提示词）
+    if (data.isMeta) continue
     let text = ''
     if (typeof msgContent === 'string') {
-      text = msgContent
+      text = isSystemText(msgContent) ? '' : msgContent
     } else if (Array.isArray(msgContent)) {
+      // 遍历所有 text block，跳过系统注入的，找第一个用户文本
       for (const block of msgContent) {
-        if (typeof block === 'string') { text = block; break }
-        if (block.type === 'text' && block.text) { text = block.text; break }
+        const t = typeof block === 'string' ? block : (block.type === 'text' && block.text ? block.text : '')
+        if (!t) continue
+        if (isSystemText(t)) {
+          // 保留 <command-name>xxx</command-name> 中的命令名
+          const cmdMatch = t.match(/<command-name>([^<]+)<\/command-name>/)
+          if (cmdMatch) { text = cmdMatch[1].trim(); break }
+          continue
+        }
+        text = t
+        break
       }
-    }
-    // 跳过系统注入消息
-    if (isSystemText(text)) {
-      // 但保留 <command-name>xxx</command-name> 中的命令名
-      const cmdMatch = text.match(/<command-name>([^<]+)<\/command-name>/)
-      if (!cmdMatch) continue
-      text = cmdMatch[1].trim()
     }
     // 去除可能残留的 XML 标签
     text = text.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()

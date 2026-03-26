@@ -127,6 +127,9 @@ export function parseContentBlocks(item) {
           }
         case 'image':
           return { type: 'image', source: block.source }
+        // [isMeta 合并] 命令注入的提示词块，由 isMeta 合并逻辑生成
+        case 'meta':
+          return { type: 'meta', text: block.text || '' }
         default:
           return { type: 'unknown', raw: block }
       }
@@ -232,7 +235,7 @@ export function useDisplayMessages(sessionContent) {
       const role = msg.role || item.type
       const content = msg.content
       const blocks = Array.isArray(content) ? content : (typeof content === 'string' ? [{ type: 'text', text: content }] : [])
-      const isToolResponse = role === 'user' && blocks.length > 0 && blocks.some(b => b.type === 'tool_result')
+      const isToolResponse = role === 'user' && blocks.length > 0 && (blocks.some(b => b.type === 'tool_result') || !!item.sourceToolUseID || !!item.sourceToolAssistantUUID)
       const isSystemInjection = role === 'user' && blocks.length > 0 && blocks.every(b => b.type === 'text') && (() => {
         if (merged.length === 0) return false
         const prev = merged[merged.length - 1]
@@ -245,9 +248,24 @@ export function useDisplayMessages(sessionContent) {
         return blocks.every(b => isToolSystemOutput(b.text))
       })()
 
+      // [isMeta 合并] isMeta=true 的 user 消息是命令注入的提示词（如 /init 注入的详细说明），
+      // 应合并到前一条 user 消息中，作为 type='meta' 块默认折叠显示。
+      // 判定条件：item.isMeta === true 且前一条是 user 消息。
+      // 合并方式：将所有 text block 转为 { type: 'meta', text } 追加到前一条 user 的 content 中。
+      // 还原方式：删除此 if 块即可恢复 isMeta 消息为独立用户消息。
+      const isMetaInjection = role === 'user' && !!item.isMeta
+
       if (merged.length > 0) {
         const prev = merged[merged.length - 1]
         const prevRole = prev.message?.role || prev.type
+        if (isMetaInjection && prevRole === 'user') {
+          const metaBlocks = blocks
+            .filter(b => b.type === 'text' && b.text)
+            .map(b => ({ type: 'meta', text: b.text }))
+          prev.message.content = [...(Array.isArray(prev.message.content) ? prev.message.content : []), ...metaBlocks]
+          if (item.uuid) prev.lastUuid = item.uuid
+          continue
+        }
         if (role === 'assistant' && prevRole === 'assistant') {
           prev.message.content = [...(Array.isArray(prev.message.content) ? prev.message.content : []), ...blocks]
           if (msg.stop_reason) prev.message.stop_reason = msg.stop_reason
@@ -256,7 +274,11 @@ export function useDisplayMessages(sessionContent) {
           continue
         }
         if (isToolResponse && prevRole === 'assistant') {
-          prev.message.content = [...(Array.isArray(prev.message.content) ? prev.message.content : []), ...blocks]
+          // Convert text blocks from sourceToolUseID messages to tool_result
+          const mergeBlocks = item.sourceToolUseID && blocks.every(b => b.type === 'text')
+            ? blocks.map(b => ({ type: 'tool_result', tool_use_id: item.sourceToolUseID, content: b.text || '' }))
+            : blocks
+          prev.message.content = [...(Array.isArray(prev.message.content) ? prev.message.content : []), ...mergeBlocks]
           if (item.uuid) prev.lastUuid = item.uuid
           continue
         }
@@ -274,7 +296,9 @@ export function useDisplayMessages(sessionContent) {
         }
       }
       const initial = extractStats(item)
-      const isSystemEvent = role === 'user' && blocks.length > 0 && blocks.every(b => b.type === 'text' && isSystemText(b.text))
+      // 含 <command-name> 的消息是用户主动执行的命令（如 /init），不算系统事件
+      const hasCommandName = blocks.some(b => b.type === 'text' && /<command-name>/.test(b.text))
+      const isSystemEvent = !hasCommandName && role === 'user' && blocks.length > 0 && blocks.every(b => b.type === 'text' && isSystemText(b.text))
       const systemEventType = isSystemEvent
         ? (blocks.every(b => /^\[Request interrupted/.test((b.text || '').trimStart())) ? 'interrupt' : 'notify')
         : undefined
