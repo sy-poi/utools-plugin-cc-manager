@@ -13,6 +13,25 @@ export function formatSize(bytes) {
   return `${bytes.toFixed(1)} ${units[i]}`
 }
 
+export function formatTokens(n) {
+  if (n == null) return '0'
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B'
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K'
+  return String(n)
+}
+
+export function formatDuration(ms) {
+  if (!ms) return ''
+  const totalSec = Math.floor(ms / 1000)
+  const h = Math.floor(totalSec / 3600)
+  const m = Math.floor((totalSec % 3600) / 60)
+  const s = totalSec % 60
+  if (h > 0) return `${h}h${m}m${s}s`
+  if (m > 0) return `${m}m${s}s`
+  return `${s}s`
+}
+
 export function shortenPath(p) {
   if (!p) return p
   const sep = p.includes('/') ? '/' : '\\'
