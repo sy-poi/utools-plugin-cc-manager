@@ -1,7 +1,7 @@
 <script setup>
 import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { IconTerminal, IconCopy, IconFork, IconStop, IconChevronUp, IconChevronDown, IconChat, IconSearch, IconClose, IconExport, IconImage, IconFolder, IconMore, IconStar, IconStarOutline, IconEdit, IconDelete } from './icons'
-import { formatTime } from '../composables/useFormat'
+import { IconTerminal, IconCopy, IconFork, IconStop, IconChevronUp, IconChevronDown, IconChat, IconSearch, IconClose, IconExport, IconImage, IconFolder, IconMore, IconStar, IconStarOutline, IconEdit, IconDelete, IconList } from './icons'
+import { formatTime, formatTokens, formatDuration } from '../composables/useFormat'
 import { parseContentBlocks, mergeToolBlocks, getMessageRole, getRoleLabel, hasXmlTags, parseTextSegments } from '../composables/useMessageParser'
 import { formatToolInput, getToolSummary, getDiff } from '../composables/useToolDisplay'
 import { useCollapse } from '../composables/useToolDisplay'
@@ -53,6 +53,24 @@ const contentBodyRef = ref(null)
 const showMoreMenu = ref(false)
 const showShareMenu = ref(false)
 const exportDialog = ref({ show: false, format: '' })
+const showOutline = ref(false)
+
+function getOutlineItems() {
+  if (!props.displayMessages) return []
+  return props.displayMessages
+    .filter(item => getMessageRole(item) === 'user' && !item.isSystemEvent)
+    .map(item => {
+      const blocks = parseContentBlocks(item)
+      const text = blocks.find(b => b.type === 'text')?.text?.trim() || ''
+      return { uuid: item.uuid, text }
+    })
+    .filter(item => item.text)
+}
+
+function scrollToMessage(uuid) {
+  const el = contentBodyRef.value?.querySelector(`[data-uuid="${uuid}"]`)
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
 
 // Close menus on click outside
 function onDocClick(e) {
@@ -336,6 +354,9 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
         <button class="header-action-btn" @click="openSearch" title="搜索 (Ctrl+F)">
           <IconSearch :size="14" />
         </button>
+        <button class="header-action-btn" :class="{ active: showOutline }" @click="showOutline = !showOutline" title="消息大纲">
+          <IconList :size="14" />
+        </button>
         <div class="more-wrapper">
           <button class="header-action-btn" @click="showMoreMenu = !showMoreMenu" title="更多">
             <IconMore :size="14" />
@@ -388,6 +409,7 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
       <button class="search-nav-btn" @click="nextMatch" title="下一个 (F3)">▼</button>
       <button class="search-nav-btn" @click="closeSearch" title="关闭 (Esc)"><IconClose :size="14" /></button>
     </div>
+    <div class="view-body">
     <div class="content-body" ref="contentBodyRef">
       <div v-if="loading" class="loading">
         <div class="spinner"></div>
@@ -435,10 +457,11 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
             </template>
           </div>
         </div>
-        <!-- 普通消息 -->
+            <!-- 普通消息 -->
         <div v-else
           class="message"
           :class="[('message-' + getMessageRole(item)), { 'message-api-error': item.isApiErrorMessage }]"
+          :data-uuid="item.uuid"
         >
           <div class="message-header">
             <span class="role-badge" :class="item.isApiErrorMessage ? 'role-error' : ('role-' + getMessageRole(item))">
@@ -509,6 +532,14 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
                       </div>
                     </div>
                   </template>
+                  <template v-else-if="block.name === 'Bash' && block.input?.command">
+                    <div class="tool-card-section">
+                      <div class="md-content bash-code-block" v-html="renderMarkdown('```bash\n' + block.input.command + '\n```')"></div>
+                    </div>
+                    <div v-if="block.input.description" class="tool-card-section">
+                      <div class="tool-card-code">description: {{ block.input.description }}</div>
+                    </div>
+                  </template>
                   <template v-else>
                     <div class="tool-card-section">
                       <div class="tool-card-code">{{ formatToolInput(block.input) }}</div>
@@ -554,9 +585,9 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
           <!-- AI 用量统计 -->
           <div v-if="getMessageRole(item) === 'assistant' && item._stats && item._stats.output_tokens" class="message-stats">
             <span v-if="item._stats.model" class="stat-item">{{ item._stats.model }}</span>
-            <span class="stat-item" title="输入 / 输出 tokens">{{ item._stats.input_tokens + item._stats.cache_read }} + {{ item._stats.output_tokens }} tokens</span>
-            <span v-if="item._stats.cache_read" class="stat-item" title="缓存读取">cache {{ item._stats.cache_read }}</span>
-            <span v-if="item._stats.durationMs" class="stat-item">{{ (item._stats.durationMs / 1000).toFixed(1) }}s</span>
+            <span class="stat-item" title="输入 / 输出 tokens">{{ formatTokens(item._stats.input_tokens + item._stats.cache_read) }} / {{ formatTokens(item._stats.output_tokens) }} tokens</span>
+            <span v-if="item._stats.cache_read" class="stat-item" title="缓存读取">cache {{ formatTokens(item._stats.cache_read) }}</span>
+            <span v-if="item._stats.durationMs" class="stat-item">{{ formatDuration(item._stats.durationMs) }}</span>
             <span v-if="item._stats.stop_reason" class="stat-item">{{ item._stats.stop_reason }}</span>
           </div>
           <!-- 悬浮操作按钮 -->
@@ -572,6 +603,23 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
         </template>
       </template>
       <div v-else class="empty-content">会话内容为空</div>
+    </div>
+    <!-- 消息大纲侧边栏 -->
+    <div v-if="showOutline" class="outline-sidebar">
+      <div class="outline-header">消息大纲</div>
+      <div class="outline-list">
+        <div
+          v-for="(it, i) in getOutlineItems()"
+          :key="it.uuid"
+          class="outline-item"
+          @click="scrollToMessage(it.uuid)"
+        >
+          <span class="outline-index">{{ i + 1 }}</span>
+          <span class="outline-text">{{ it.text }}</span>
+        </div>
+        <div v-if="getOutlineItems().length === 0" class="outline-empty">无用户消息</div>
+      </div>
+    </div>
     </div>
     <!-- 滚动按钮 -->
     <div class="scroll-buttons">
@@ -847,10 +895,97 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
   background: rgba(144,202,249,0.12);
 }
 
+.view-body {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+  min-height: 0;
+}
+
 .content-body {
   flex: 1;
   overflow: auto;
   padding: 16px;
+}
+
+/* Outline sidebar */
+.outline-sidebar {
+  width: 200px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid #e0e0e0;
+  background: #fafafa;
+  overflow: hidden;
+}
+:global(.dark .outline-sidebar) {
+  background: #252525;
+  border-left-color: #333;
+}
+.outline-header {
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.5;
+  border-bottom: 1px solid #e0e0e0;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+:global(.dark .outline-header) {
+  border-bottom-color: #333;
+}
+.outline-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.outline-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.outline-item:hover {
+  background: rgba(0,0,0,0.05);
+}
+:global(.dark .outline-item:hover) {
+  background: rgba(255,255,255,0.06);
+}
+.outline-index {
+  flex-shrink: 0;
+  font-size: 10px;
+  opacity: 0.4;
+  min-width: 16px;
+  padding-top: 1px;
+}
+.outline-text {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  opacity: 0.75;
+}
+.outline-item:hover .outline-text {
+  opacity: 1;
+}
+.outline-empty {
+  padding: 12px;
+  font-size: 12px;
+  opacity: 0.4;
+  text-align: center;
+}
+
+.header-action-btn.active {
+  opacity: 1;
+  background: rgba(0,0,0,0.07);
+}
+:global(.dark .header-action-btn.active) {
+  background: rgba(255,255,255,0.1);
 }
 
 .message {
@@ -1128,6 +1263,11 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
+  max-height: 400px;
+  overflow: auto;
+}
+.bash-code-block pre {
+  margin: 0;
   max-height: 400px;
   overflow: auto;
 }
