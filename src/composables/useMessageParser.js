@@ -110,7 +110,8 @@ export function parseContentBlocks(item) {
         case 'text':
           return { type: 'text', text: (block.text || '').replace(/^\n+/, '') }
         case 'thinking':
-          return { type: 'thinking', text: block.thinking || '' }
+          if (!block.thinking) return null
+          return { type: 'thinking', text: block.thinking }
         case 'tool_use':
           return {
             type: 'tool_use',
@@ -134,6 +135,7 @@ export function parseContentBlocks(item) {
           return { type: 'unknown', raw: block }
       }
     }).filter(b => {
+      if (!b) return false
       if (b.type === 'text' && (!b.text || !b.text.trim())) return false
       return true
     })

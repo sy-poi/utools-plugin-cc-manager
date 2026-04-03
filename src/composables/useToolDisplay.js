@@ -6,11 +6,8 @@ export function formatToolInput(input) {
   const entries = Object.entries(input)
   if (entries.length === 0) return ''
   return entries.map(([key, val]) => {
-    if (typeof val === 'string') {
-      return val.length > 200 ? `${key}: ${val.slice(0, 200)}...` : `${key}: ${val}`
-    }
-    const s = JSON.stringify(val)
-    return s.length > 200 ? `${key}: ${s.slice(0, 200)}...` : `${key}: ${s}`
+    if (typeof val === 'string') return `${key}: ${val}`
+    return `${key}: ${JSON.stringify(val)}`
   }).join('\n')
 }
 
