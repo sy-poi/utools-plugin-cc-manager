@@ -7,7 +7,7 @@ export function useSnackbar() {
   function showSnackbar(message, type = 'success') {
     clearTimeout(snackbarTimer)
     snackbar.value = { show: true, message, type }
-    snackbarTimer = setTimeout(() => { snackbar.value.show = false }, 3000)
+    snackbarTimer = setTimeout(() => { snackbar.value.show = false }, 2500)
   }
 
   return { snackbar, showSnackbar }

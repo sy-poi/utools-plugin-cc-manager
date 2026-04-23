@@ -1,6 +1,6 @@
 <script setup>
-import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { IconTerminal, IconCopy, IconFork, IconStop, IconChevronUp, IconChevronDown, IconChat, IconSearch, IconClose, IconExport, IconImage, IconFolder, IconMore, IconStar, IconStarOutline, IconEdit, IconDelete, IconList } from './icons'
+import { ref, watch, nextTick, onMounted, onUnmounted, computed } from 'vue'
+import { IconTerminal, IconCopy, IconFork, IconStop, IconChevronUp, IconChevronDown, IconChat, IconSearch, IconClose, IconExport, IconImage, IconFolder, IconMore, IconStar, IconStarOutline, IconEdit, IconDelete, IconList, IconOpenExternal, IconRestore } from './icons'
 import { formatTime, formatTokens, formatDuration } from '../composables/useFormat'
 import { parseContentBlocks, mergeToolBlocks, getMessageRole, getRoleLabel, hasXmlTags, parseTextSegments } from '../composables/useMessageParser'
 import { formatToolInput, getToolSummary, getDiff } from '../composables/useToolDisplay'
@@ -15,10 +15,12 @@ import ExportOptionsDialog from './ExportOptionsDialog.vue'
 const props = defineProps({
   session: Object,
   displayMessages: Array,
-  loading: Boolean
+  loading: Boolean,
+  agentToolUseMap: { type: Object, default: () => ({}) },
+  standalone: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['fork', 'resume', 'preview-image', 'rename', 'delete', 'toggle-favorite'])
+const emit = defineEmits(['fork', 'fork-summary', 'resume', 'preview-image', 'rename', 'delete', 'toggle-favorite', 'select-session', 'open-session-window'])
 
 const { showSnackbar } = useSnackbar()
 const { toggleCollapse, isCollapsed, forceExpand } = useCollapse()
@@ -54,17 +56,116 @@ const showMoreMenu = ref(false)
 const showShareMenu = ref(false)
 const exportDialog = ref({ show: false, format: '' })
 const showOutline = ref(false)
+const snapshotDialog = ref({ show: false, item: null, restoring: false, selected: new Set(), step: 1, diffData: [], activeFile: 0 })
+
+function openRestoreDialog(item) {
+  const allFiles = Object.keys(item.snapshotData.trackedFileBackups)
+  snapshotDialog.value = { show: true, item, restoring: false, selected: new Set(allFiles), step: 1, diffData: [], activeFile: 0 }
+}
+
+function toggleSnapshotFile(filePath) {
+  const s = snapshotDialog.value.selected
+  if (s.has(filePath)) s.delete(filePath)
+  else s.add(filePath)
+  snapshotDialog.value.selected = new Set(s)
+}
+
+// LCS 行级 diff：current → backup（- 表示当前有但快照没有，+ 表示快照有但当前没有）
+function computeLineDiff(currentText, backupText) {
+  const a = (currentText || '').split('\n')
+  const b = (backupText || '').split('\n')
+  if (a.join('\n') === b.join('\n')) return []
+  const m = a.length, n = b.length
+  if (m > 3000 || n > 3000) return [{ type: 'info', text: `文件过大（${m} / ${n} 行），无法预览 diff` }]
+  const dp = Array.from({ length: m + 1 }, () => new Int32Array(n + 1))
+  for (let i = 1; i <= m; i++)
+    for (let j = 1; j <= n; j++)
+      dp[i][j] = a[i-1] === b[j-1] ? dp[i-1][j-1] + 1 : Math.max(dp[i-1][j], dp[i][j-1])
+  const raw = []
+  let i = m, j = n
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && a[i-1] === b[j-1]) { raw.unshift({ type: 'ctx', text: a[i-1] }); i--; j-- }
+    else if (j > 0 && (i === 0 || dp[i][j-1] >= dp[i-1][j])) { raw.unshift({ type: 'add', text: b[j-1] }); j-- }
+    else { raw.unshift({ type: 'del', text: a[i-1] }); i-- }
+  }
+  // 折叠连续未变行，保留上下 3 行上下文
+  const CTX = 3
+  const keep = new Uint8Array(raw.length)
+  for (let k = 0; k < raw.length; k++) {
+    if (raw[k].type !== 'ctx') {
+      for (let d = Math.max(0, k - CTX); d <= Math.min(raw.length - 1, k + CTX); d++) keep[d] = 1
+    }
+  }
+  const out = []; let hidden = 0
+  for (let k = 0; k < raw.length; k++) {
+    if (keep[k]) {
+      if (hidden) { out.push({ type: 'fold', count: hidden }); hidden = 0 }
+      out.push(raw[k])
+    } else hidden++
+  }
+  if (hidden) out.push({ type: 'fold', count: hidden })
+  return out
+}
+
+function goToStep2() {
+  const { item, selected } = snapshotDialog.value
+  const filtered = Object.fromEntries(
+    Object.entries(item.snapshotData.trackedFileBackups).filter(([k]) => selected.has(k))
+  )
+  const result = window.services.getSnapshotFileContents(props.session.path, filtered)
+  if (!result.success) { showSnackbar(result.error || '读取文件失败', 'error'); return }
+  const diffData = result.files.map(f => {
+    const lines = computeLineDiff(f.currentContent || '', f.backupContent || '')
+    const adds = lines.filter(l => l.type === 'add').length
+    const dels = lines.filter(l => l.type === 'del').length
+    return { filePath: f.filePath, fileName: f.filePath.replace(/.*[/\\]/, ''), lines, adds, dels, unchanged: lines.length === 0 }
+  })
+  snapshotDialog.value.step = 2
+  snapshotDialog.value.diffData = diffData
+  snapshotDialog.value.activeFile = 0
+}
+
+async function doRestoreSnapshot() {
+  const { item, selected } = snapshotDialog.value
+  if (!item || !props.session?.path || selected.size === 0) return
+  snapshotDialog.value.restoring = true
+  const filtered = Object.fromEntries(
+    Object.entries(item.snapshotData.trackedFileBackups).filter(([k]) => selected.has(k))
+  )
+  try {
+    const result = window.services.restoreSnapshot(props.session.path, filtered)
+    snapshotDialog.value.show = false
+    if (result.success) {
+      showSnackbar(`已恢复 ${result.restoredFiles.length} 个文件`)
+    } else if (result.errors?.length) {
+      showSnackbar('部分文件恢复失败：' + result.errors.join('; '), 'error')
+    } else {
+      showSnackbar(result.error || '恢复失败', 'error')
+    }
+  } catch (e) {
+    snapshotDialog.value.show = false
+    showSnackbar('恢复失败：' + e.message, 'error')
+  }
+}
+
+const isCompressedOnlySession = computed(() =>
+  props.displayMessages?.length === 1 && props.displayMessages[0].isCompactSummary
+)
 
 function getOutlineItems() {
   if (!props.displayMessages) return []
-  return props.displayMessages
-    .filter(item => getMessageRole(item) === 'user' && !item.isSystemEvent)
-    .map(item => {
+  const items = []
+  let userIndex = 0
+  for (const item of props.displayMessages) {
+    if (item.isCompactSummary) {
+      items.push({ uuid: item.uuid, isCompactSummary: true, index: null })
+    } else if (getMessageRole(item) === 'user' && !item.isSystemEvent) {
       const blocks = parseContentBlocks(item)
       const text = blocks.find(b => b.type === 'text')?.text?.trim() || ''
-      return { uuid: item.uuid, text }
-    })
-    .filter(item => item.text)
+      if (text) { userIndex++; items.push({ uuid: item.uuid, text, index: userIndex }) }
+    }
+  }
+  return items
 }
 
 function scrollToMessage(uuid) {
@@ -333,24 +434,27 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
   <template v-if="session">
     <div class="content-header">
       <div class="content-header-top">
-        <button class="resume-btn" @click="emit('toggle-favorite', session)" :title="session.isFavorite ? '取消收藏' : '收藏'">
+        <button v-if="!session.isSubagent" class="resume-btn" @click="emit('toggle-favorite', session)" :title="session.isFavorite ? '取消收藏' : '收藏'">
           <IconStar v-if="session.isFavorite" :size="14" style="color: #ff9800" />
           <IconStarOutline v-else :size="14" />
         </button>
         <h3>{{ session.name }}</h3>
-        <button class="resume-btn" @click="emit('rename', session)" title="重命名">
+        <button v-if="!session.isSubagent" class="resume-btn" @click="emit('rename', session)" title="重命名">
           <IconEdit :size="13" />
         </button>
       </div>
       <div class="content-header-sub">
-        <span class="content-cwd">{{ session.sessionId || session.cwd }}</span>
-        <button v-if="session.sessionId" class="resume-btn" @click="emit('resume')" title="在终端中恢复会话">
+        <span class="content-cwd">{{ session.isSubagent ? session.agentId : (session.sessionId || session.cwd) }}</span>
+        <button v-if="session.sessionId && !session.isSubagent" class="resume-btn" @click="emit('resume')" title="在终端中恢复会话">
           <IconTerminal />
         </button>
-        <button v-if="session.sessionId" class="resume-btn" @click="copyResumeCommand" title="复制恢复命令">
+        <button v-if="session.sessionId && !session.isSubagent" class="resume-btn" @click="copyResumeCommand" title="复制恢复命令">
           <IconCopy :size="13" />
         </button>
         <div style="flex:1"></div>
+        <button v-if="!standalone" class="header-action-btn" @click="emit('open-session-window', session)" title="新窗口打开">
+          <IconOpenExternal :size="14" />
+        </button>
         <button class="header-action-btn" @click="openSearch" title="搜索 (Ctrl+F)">
           <IconSearch :size="14" />
         </button>
@@ -379,11 +483,13 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
                 <button @click="doExport('image')">导出长图</button>
               </div>
             </div>
-            <div class="menu-divider"></div>
-            <button class="menu-danger" @click="confirmDelete">
-              <IconDelete :size="13" />
-              <span>删除会话</span>
-            </button>
+            <template v-if="!session.isSubagent">
+              <div class="menu-divider"></div>
+              <button class="menu-danger" @click="confirmDelete">
+                <IconDelete :size="13" />
+                <span>删除会话</span>
+              </button>
+            </template>
           </div>
         </div>
       </div>
@@ -425,6 +531,42 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
             <span class="system-event-time">{{ formatTime(item.timestamp) }}</span>
           </div>
           <div class="system-event-line"></div>
+        </div>
+        <!-- 文件历史快照：checkpoint 标记 -->
+        <div v-else-if="item.isSnapshot" class="snapshot-checkpoint">
+          <div class="snapshot-bar" @click="toggleCollapse(item.uuid + '-snap')">
+            <div class="snapshot-line"></div>
+            <div class="snapshot-center">
+              <span class="snapshot-badge"><IconRestore :size="11" />快照</span>
+              <span class="snapshot-meta">{{ formatTime(item.timestamp) }}</span>
+              <span class="snapshot-file-count">{{ Object.keys(item.snapshotData.trackedFileBackups).length }} 个文件</span>
+              <span class="collapse-icon">{{ isCollapsed(item.uuid + '-snap') ? '▸' : '▾' }}</span>
+            </div>
+            <div class="snapshot-line"></div>
+            <button v-if="!session.isSubagent" class="snapshot-restore-btn" @click.stop="openRestoreDialog(item)">
+              <IconRestore :size="12" />
+              恢复
+            </button>
+          </div>
+          <div v-if="!isCollapsed(item.uuid + '-snap')" class="snapshot-files">
+            <span v-for="(_, filePath) in item.snapshotData.trackedFileBackups" :key="filePath" class="snapshot-file-chip">{{ filePath }}</span>
+          </div>
+        </div>
+        <!-- 上下文压缩摘要，默认折叠 -->
+        <div v-else-if="item.isCompactSummary" class="message-compact-summary" :data-uuid="item.uuid">
+          <div class="compact-summary-header clickable" @click="toggleCollapse(item.uuid + '-summary')">
+            <span class="role-badge role-summary">上下文压缩</span>
+            <span class="message-time">{{ formatTime(item.timestamp) }}</span>
+            <button v-if="!session.isSubagent" class="summary-fork-btn" @click.stop="emit('fork-summary', item)" title="以此摘要创建新会话分支">
+              <IconFork :size="12" />
+            </button>
+            <span class="collapse-icon summary-collapse-icon">{{ isCollapsed(item.uuid + '-summary') ? '▸' : '▾' }}</span>
+          </div>
+          <div v-if="!isCollapsed(item.uuid + '-summary')" class="compact-summary-body">
+            <template v-for="(block, idx) in parseContentBlocks(item)" :key="idx">
+              <div v-if="block.type === 'text'" class="block-text">{{ block.text }}</div>
+            </template>
+          </div>
         </div>
         <div v-else-if="item.isSystemEvent" class="message message-system-notify">
           <div class="message-header">
@@ -515,6 +657,7 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
                 <div class="tool-card-header clickable" @click="toggleCollapse(item.uuid + '-tool-' + idx)">
                   <span class="block-tag" :class="block.isError ? 'tag-error' : 'tag-tool'">{{ block.name }}</span>
                   <span v-if="getToolSummary(block.name, block.input)" class="tool-summary" :data-full-path="block.input?.file_path || block.input?.path || ''">{{ getToolSummary(block.name, block.input) }}</span>
+                  <a v-if="agentToolUseMap[block.id]" class="view-subagent-link" @click.stop="emit('open-session-window', agentToolUseMap[block.id])" title="新窗口查看子对话">查看</a>
                   <span class="collapse-icon">{{ isCollapsed(item.uuid + '-tool-' + idx) ? '▸' : '▾' }}</span>
                 </div>
                 <div v-if="!isCollapsed(item.uuid + '-tool-' + idx)" class="tool-card-body">
@@ -595,12 +738,30 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
             <button class="msg-action-btn" @click="copyMessageText(item)" title="复制文本">
               <IconCopy :size="12" />
             </button>
-            <button v-if="getMessageRole(item) === 'assistant'" class="msg-action-btn" @click="emit('fork', item)" title="从此处分叉创建新会话">
+            <button v-if="getMessageRole(item) === 'assistant' && !session.isSubagent" class="msg-action-btn" @click="emit('fork', item)" title="从此处分叉创建新会话">
               <IconFork :size="12" />
             </button>
           </div>
         </div>
         </template>
+        <!-- 仅有压缩摘要时的引导提示 -->
+        <div v-if="isCompressedOnlySession" class="compressed-only-hint" @click="emit('resume')">
+          <div class="compressed-hint-icon-ring">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2a4 4 0 0 1 4 4c0 1.5-.8 2.8-2 3.5V12h-4V9.5A4 4 0 0 1 8 6a4 4 0 0 1 4-4z"/>
+              <path d="M8 12H6a2 2 0 0 0-2 2v2a2 2 0 0 0 2 2h1"/>
+              <path d="M16 12h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-1"/>
+              <rect x="9" y="12" width="6" height="8" rx="1"/>
+              <path d="M9 18h6"/>
+            </svg>
+          </div>
+          <p class="compressed-hint-title">这是一个压缩后的会话</p>
+          <p class="compressed-hint-desc">AI 将保留之前对话的记忆<br>点击立即在终端中恢复对话</p>
+          <div class="compressed-hint-btn">
+            <IconTerminal :size="14" />
+            <span>恢复对话</span>
+          </div>
+        </div>
       </template>
       <div v-else class="empty-content">会话内容为空</div>
     </div>
@@ -609,17 +770,22 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
       <div class="outline-header">消息大纲</div>
       <div class="outline-list">
         <div
-          v-for="(it, i) in getOutlineItems()"
+          v-for="it in getOutlineItems()"
           :key="it.uuid"
           class="outline-item"
+          :class="{ 'outline-item-summary': it.isCompactSummary }"
           @click="scrollToMessage(it.uuid)"
         >
-          <span class="outline-index">{{ i + 1 }}</span>
-          <span class="outline-text">{{ it.text }}</span>
+          <template v-if="it.isCompactSummary">
+            <span class="outline-summary-tag">上下文压缩</span>
+          </template>
+          <template v-else>
+            <span class="outline-index">{{ it.index }}</span>
+            <span class="outline-text">{{ it.text }}</span>
+          </template>
         </div>
         <div v-if="getOutlineItems().length === 0" class="outline-empty">无用户消息</div>
       </div>
-    </div>
     </div>
     <!-- 滚动按钮 -->
     <div class="scroll-buttons">
@@ -628,6 +794,14 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
       </button>
       <button class="scroll-btn" @click="scrollToBottom" title="滚动到底部">
         <IconChevronDown />
+      </button>
+    </div>
+    </div>
+    <!-- 底部恢复会话栏 -->
+    <div v-if="!isCompressedOnlySession && session.sessionId && !session.isSubagent" class="bottom-resume-bar">
+      <button class="bottom-resume-btn" @click="emit('resume')">
+        <IconTerminal :size="15" />
+        <span>在终端中恢复此会话</span>
       </button>
     </div>
   </template>
@@ -644,6 +818,98 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
     @confirm="doExportWithOptions"
     @cancel="exportDialog.show = false"
   />
+
+  <!-- 快照恢复确认对话框 -->
+  <div v-if="snapshotDialog.show" class="restore-overlay" @click.self="snapshotDialog.show = false">
+    <div class="restore-dialog" :class="{ 'restore-dialog-wide': snapshotDialog.step === 2 }">
+
+      <!-- 步骤一：选择文件 -->
+      <template v-if="snapshotDialog.step === 1">
+        <div class="restore-dialog-header">
+          <IconRestore :size="16" style="color: #00897b" />
+          <span>恢复文件到此快照</span>
+          <span class="restore-step-hint">第 1 步 / 共 2 步</span>
+        </div>
+        <div class="restore-dialog-body">
+          <p class="restore-desc">
+            选择要恢复的文件（已选 <strong>{{ snapshotDialog.selected.size }}</strong> / {{ Object.keys(snapshotDialog.item?.snapshotData?.trackedFileBackups || {}).length }}）：
+          </p>
+          <div class="restore-file-list">
+            <label
+              v-for="(backup, filePath) in snapshotDialog.item?.snapshotData?.trackedFileBackups"
+              :key="filePath"
+              class="restore-file-row"
+              :class="{ 'restore-file-unchecked': !snapshotDialog.selected.has(filePath) }"
+            >
+              <input type="checkbox" class="restore-file-checkbox"
+                :checked="snapshotDialog.selected.has(filePath)"
+                @change="toggleSnapshotFile(filePath)" />
+              <span class="restore-file-path">{{ filePath }}</span>
+              <span class="restore-file-version">v{{ backup.version }}</span>
+            </label>
+          </div>
+        </div>
+        <div class="restore-dialog-footer">
+          <button class="restore-btn-cancel" @click="snapshotDialog.show = false">取消</button>
+          <button class="restore-btn-confirm" @click="goToStep2" :disabled="snapshotDialog.selected.size === 0">
+            下一步 →
+          </button>
+        </div>
+      </template>
+
+      <!-- 步骤二：diff 预览 -->
+      <template v-else>
+        <div class="restore-dialog-header">
+          <IconRestore :size="16" style="color: #00897b" />
+          <span>变更预览</span>
+          <span class="restore-step-hint">第 2 步 / 共 2 步</span>
+        </div>
+        <div class="restore-diff-tabs">
+          <button
+            v-for="(fd, idx) in snapshotDialog.diffData" :key="fd.filePath"
+            class="restore-diff-tab"
+            :class="{ active: snapshotDialog.activeFile === idx, unchanged: fd.unchanged }"
+            @click="snapshotDialog.activeFile = idx"
+          >
+            {{ fd.fileName }}
+            <template v-if="!fd.unchanged">
+              <span v-if="fd.dels" class="diff-tab-del">-{{ fd.dels }}</span>
+              <span v-if="fd.adds" class="diff-tab-add">+{{ fd.adds }}</span>
+            </template>
+            <span v-else class="diff-tab-same">unchanged</span>
+          </button>
+        </div>
+        <div class="restore-diff-body">
+          <template v-if="snapshotDialog.diffData[snapshotDialog.activeFile]">
+            <div v-if="snapshotDialog.diffData[snapshotDialog.activeFile].unchanged" class="diff-unchanged">
+              文件内容与快照相同，无需恢复
+            </div>
+            <div v-else class="diff-view-wrap">
+              <div
+                v-for="(line, li) in snapshotDialog.diffData[snapshotDialog.activeFile].lines"
+                :key="li"
+                class="diff-line"
+                :class="'diff-' + line.type"
+              >
+                <span class="diff-sign">{{ line.type === 'add' ? '+' : line.type === 'del' ? '-' : line.type === 'fold' ? '⋯' : ' ' }}</span>
+                <span v-if="line.type === 'fold'" class="diff-fold-text">{{ line.count }} 行未变更</span>
+                <span v-else-if="line.type === 'info'" class="diff-fold-text">{{ line.text }}</span>
+                <span v-else class="diff-text">{{ line.text }}</span>
+              </div>
+            </div>
+          </template>
+        </div>
+        <div class="restore-dialog-footer">
+          <button class="restore-btn-cancel" @click="snapshotDialog.step = 1">← 上一步</button>
+          <button class="restore-btn-confirm" @click="doRestoreSnapshot" :disabled="snapshotDialog.restoring">
+            <IconRestore :size="13" />
+            {{ snapshotDialog.restoring ? '恢复中…' : `确认恢复 ${snapshotDialog.selected.size} 个文件` }}
+          </button>
+        </div>
+      </template>
+
+    </div>
+  </div>
 </template>
 
 <style scoped>
@@ -899,6 +1165,7 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
   flex: 1;
   display: flex;
   flex-direction: row;
+  position: relative;
   overflow: hidden;
   min-height: 0;
 }
@@ -979,6 +1246,23 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
   opacity: 0.4;
   text-align: center;
 }
+.outline-item-summary {
+  justify-content: center;
+  padding: 4px 10px;
+}
+.outline-summary-tag {
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 8px;
+  background: rgba(99, 102, 241, 0.15);
+  color: #6366f1;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+}
+:global(.dark .outline-summary-tag) {
+  background: rgba(99, 102, 241, 0.2);
+  color: #a5b4fc;
+  border-color: rgba(99, 102, 241, 0.4);
+}
 
 .header-action-btn.active {
   opacity: 1;
@@ -1020,6 +1304,66 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
 :global(.dark .message-system-notify) {
   background: rgba(255, 152, 0, 0.1);
   border-left-color: rgba(255, 152, 0, 0.6);
+}
+.message-compact-summary {
+  margin: 4px 0;
+  border-radius: 8px;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  background: rgba(99, 102, 241, 0.05);
+  overflow: hidden;
+}
+.compact-summary-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  user-select: none;
+}
+.compact-summary-body {
+  padding: 8px 12px 10px;
+  border-top: 1px solid rgba(99, 102, 241, 0.15);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.role-summary {
+  background: #6366f1;
+  color: #fff;
+}
+.summary-fork-btn {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #6366f1;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 0.15s, background 0.15s;
+}
+.summary-fork-btn:hover {
+  opacity: 1;
+  background: rgba(99, 102, 241, 0.12);
+}
+:global(.dark .summary-fork-btn) {
+  color: #a5b4fc;
+}
+:global(.dark .summary-fork-btn:hover) {
+  background: rgba(99, 102, 241, 0.2);
+}
+.summary-collapse-icon {
+  opacity: 0.5;
+  font-size: 12px;
+}
+:global(.dark .message-compact-summary) {
+  border-color: rgba(129, 140, 248, 0.3);
+  background: rgba(99, 102, 241, 0.08);
+}
+:global(.dark .compact-summary-body) {
+  border-top-color: rgba(129, 140, 248, 0.2);
 }
 .message-api-error {
   background: rgba(211, 47, 47, 0.06);
@@ -1070,10 +1414,10 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
   background: #ff9800;
   color: #fff;
 }
-.role-badge:not(.role-user):not(.role-assistant):not(.role-system-notify) {
+.role-badge:not(.role-user):not(.role-assistant):not(.role-system-notify):not(.role-summary) {
   background: rgba(0,0,0,0.1);
 }
-:global(.dark .role-badge:not(.role-user):not(.role-assistant):not(.role-system-notify)) {
+:global(.dark .role-badge:not(.role-user):not(.role-assistant):not(.role-system-notify):not(.role-summary)) {
   background: rgba(255,255,255,0.15);
 }
 .message-time {
@@ -1165,6 +1509,8 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
   filter: brightness(1.1);
 }
 .tool-summary {
+  flex: 1;
+  min-width: 0;
   font-size: 12px;
   opacity: 0.6;
   overflow: hidden;
@@ -1236,6 +1582,28 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
   padding: 5px 10px;
   cursor: pointer;
   user-select: none;
+}
+.view-subagent-link {
+  font-size: 11px;
+  padding: 1px 6px;
+  background: rgba(103, 58, 183, 0.08);
+  color: #673ab7;
+  border-radius: 3px;
+  cursor: pointer;
+  flex-shrink: 0;
+  text-decoration: none;
+  line-height: 18px;
+  white-space: nowrap;
+}
+.view-subagent-link:hover {
+  background: rgba(103, 58, 183, 0.18);
+}
+:global(.dark .view-subagent-link) {
+  background: rgba(179, 157, 219, 0.12);
+  color: #b39ddb;
+}
+:global(.dark .view-subagent-link:hover) {
+  background: rgba(179, 157, 219, 0.22);
 }
 .tool-card-header:hover {
   background: rgba(0,0,0,0.03);
@@ -1527,5 +1895,543 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
 .empty-main p {
   margin-top: 12px;
   font-size: 16px;
+}
+
+.bottom-resume-bar {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 10px 16px;
+  border-top: 1px solid rgba(0,0,0,0.07);
+  flex-shrink: 0;
+}
+:global(.dark .bottom-resume-bar) {
+  border-top-color: rgba(255,255,255,0.07);
+}
+.bottom-resume-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 20px;
+  border: 1px solid rgba(0,0,0,0.12);
+  border-radius: 20px;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  opacity: 0.45;
+  transition: opacity 0.15s, border-color 0.15s, background 0.15s;
+}
+.bottom-resume-btn:hover {
+  opacity: 1;
+  border-color: #6366f1;
+  color: #6366f1;
+  background: rgba(99, 102, 241, 0.06);
+}
+:global(.dark .bottom-resume-btn) {
+  border-color: rgba(255,255,255,0.15);
+}
+:global(.dark .bottom-resume-btn:hover) {
+  border-color: #818cf8;
+  color: #a5b4fc;
+  background: rgba(99, 102, 241, 0.12);
+}
+
+.compressed-only-hint {
+  margin: 28px auto 0;
+  max-width: 400px;
+  padding: 32px 28px 28px;
+  border: 1.5px dashed rgba(99, 102, 241, 0.35);
+  border-radius: 16px;
+  background: rgba(99, 102, 241, 0.04);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
+  user-select: none;
+}
+.compressed-only-hint:hover {
+  background: rgba(99, 102, 241, 0.09);
+  border-color: rgba(99, 102, 241, 0.6);
+  box-shadow: 0 4px 20px rgba(99, 102, 241, 0.12);
+}
+:global(.dark .compressed-only-hint) {
+  border-color: rgba(129, 140, 248, 0.3);
+  background: rgba(99, 102, 241, 0.07);
+}
+:global(.dark .compressed-only-hint:hover) {
+  background: rgba(99, 102, 241, 0.14);
+  border-color: rgba(129, 140, 248, 0.55);
+  box-shadow: 0 4px 20px rgba(99, 102, 241, 0.18);
+}
+.compressed-hint-icon-ring {
+  width: 68px;
+  height: 68px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(139, 92, 246, 0.2));
+  border: 1.5px solid rgba(99, 102, 241, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #6366f1;
+  margin-bottom: 16px;
+  transition: transform 0.2s;
+}
+.compressed-only-hint:hover .compressed-hint-icon-ring {
+  transform: scale(1.06);
+}
+:global(.dark .compressed-hint-icon-ring) {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(139, 92, 246, 0.25));
+  border-color: rgba(129, 140, 248, 0.4);
+  color: #a5b4fc;
+}
+.compressed-hint-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #4f46e5;
+}
+:global(.dark .compressed-hint-title) {
+  color: #a5b4fc;
+}
+.compressed-hint-desc {
+  margin: 0 0 20px;
+  font-size: 13px;
+  line-height: 1.7;
+  opacity: 0.65;
+}
+.compressed-hint-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 18px;
+  border-radius: 20px;
+  background: #6366f1;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  transition: background 0.15s, transform 0.15s;
+}
+.compressed-only-hint:hover .compressed-hint-btn {
+  background: #4f46e5;
+  transform: translateY(-1px);
+}
+:global(.dark .compressed-hint-btn) {
+  background: #4f46e5;
+}
+:global(.dark .compressed-only-hint:hover .compressed-hint-btn) {
+  background: #4338ca;
+}
+
+/* ── 文件历史快照 checkpoint ── */
+.snapshot-checkpoint {
+  margin: 4px 0 6px;
+}
+.snapshot-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  padding: 3px 0;
+  min-height: 24px;
+}
+.snapshot-bar:hover .snapshot-center {
+  opacity: 1;
+}
+.snapshot-line {
+  flex: 1;
+  height: 1px;
+  background: rgba(0, 137, 123, 0.25);
+  min-width: 8px;
+}
+:global(.dark .snapshot-line) {
+  background: rgba(77, 182, 172, 0.25);
+}
+.snapshot-center {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0.85;
+  transition: opacity 0.15s;
+  flex-shrink: 0;
+}
+.snapshot-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: rgba(0, 137, 123, 0.12);
+  color: #00695c;
+  border: 1px solid rgba(0, 137, 123, 0.25);
+}
+:global(.dark .snapshot-badge) {
+  background: rgba(77, 182, 172, 0.15);
+  color: #4db6ac;
+  border-color: rgba(77, 182, 172, 0.3);
+}
+.snapshot-meta {
+  font-size: 11px;
+  color: #00695c;
+  opacity: 0.8;
+}
+:global(.dark .snapshot-meta) {
+  color: #4db6ac;
+}
+.snapshot-file-count {
+  font-size: 11px;
+  opacity: 0.55;
+}
+.snapshot-restore-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(0, 137, 123, 0.35);
+  background: rgba(0, 137, 123, 0.08);
+  color: #00695c;
+  cursor: pointer;
+  font-weight: 500;
+  transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+  opacity: 0;
+}
+:global(.dark .snapshot-restore-btn) {
+  border-color: rgba(77, 182, 172, 0.35);
+  background: rgba(77, 182, 172, 0.1);
+  color: #4db6ac;
+}
+.snapshot-bar:hover .snapshot-restore-btn {
+  opacity: 1;
+}
+.snapshot-restore-btn:hover {
+  background: rgba(0, 137, 123, 0.16);
+  border-color: rgba(0, 137, 123, 0.5);
+}
+:global(.dark .snapshot-restore-btn:hover) {
+  background: rgba(77, 182, 172, 0.18);
+  border-color: rgba(77, 182, 172, 0.5);
+}
+.snapshot-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 4px 4px;
+}
+.snapshot-file-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(0, 137, 123, 0.07);
+  color: #00695c;
+  border: 1px solid rgba(0, 137, 123, 0.18);
+  font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+  word-break: break-all;
+}
+:global(.dark .snapshot-file-chip) {
+  background: rgba(77, 182, 172, 0.1);
+  color: #4db6ac;
+  border-color: rgba(77, 182, 172, 0.2);
+}
+
+/* ── 快照恢复确认弹窗 ── */
+.restore-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.restore-dialog {
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+  width: 460px;
+  max-width: 90vw;
+  overflow: hidden;
+}
+:global(.dark .restore-dialog) {
+  background: #242424;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+.restore-dialog-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 20px 14px;
+  font-size: 15px;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.07);
+}
+:global(.dark .restore-dialog-header) {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+.restore-dialog-body {
+  padding: 16px 20px;
+}
+.restore-desc {
+  font-size: 13px;
+  margin: 0 0 12px;
+  opacity: 0.8;
+  line-height: 1.5;
+}
+.restore-file-list {
+  border: 1px solid rgba(0, 0, 0, 0.09);
+  border-radius: 8px;
+  overflow: hidden;
+  max-height: 240px;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+:global(.dark .restore-file-list) {
+  border-color: rgba(255, 255, 255, 0.1);
+}
+.restore-file-row {
+  display: flex;
+  align-items: center;
+  padding: 7px 12px;
+  font-size: 12px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+  gap: 8px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.restore-file-row:last-child {
+  border-bottom: none;
+}
+.restore-file-row:hover {
+  background: rgba(0, 137, 123, 0.05);
+}
+:global(.dark .restore-file-row:hover) {
+  background: rgba(77, 182, 172, 0.07);
+}
+:global(.dark .restore-file-row) {
+  border-bottom-color: rgba(255, 255, 255, 0.06);
+}
+.restore-file-row:nth-child(odd) {
+  background: rgba(0, 0, 0, 0.02);
+}
+:global(.dark .restore-file-row:nth-child(odd)) {
+  background: rgba(255, 255, 255, 0.03);
+}
+.restore-file-unchecked {
+  opacity: 0.38;
+}
+.restore-file-checkbox {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  accent-color: #00897b;
+}
+.restore-file-path {
+  font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+  word-break: break-all;
+  flex: 1;
+  min-width: 0;
+}
+.restore-file-version {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(0, 137, 123, 0.1);
+  color: #00695c;
+  border: 1px solid rgba(0, 137, 123, 0.2);
+}
+:global(.dark .restore-file-version) {
+  background: rgba(77, 182, 172, 0.12);
+  color: #4db6ac;
+  border-color: rgba(77, 182, 172, 0.25);
+}
+.restore-warn {
+  font-size: 12px;
+  color: #d32f2f;
+  background: rgba(211, 47, 47, 0.06);
+  border: 1px solid rgba(211, 47, 47, 0.2);
+  border-radius: 6px;
+  padding: 8px 12px;
+  line-height: 1.5;
+}
+:global(.dark .restore-warn) {
+  color: #ef9a9a;
+  background: rgba(239, 154, 154, 0.08);
+  border-color: rgba(239, 154, 154, 0.2);
+}
+.restore-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 14px 20px;
+  border-top: 1px solid rgba(0, 0, 0, 0.07);
+}
+:global(.dark .restore-dialog-footer) {
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+.restore-btn-cancel {
+  padding: 7px 16px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.restore-btn-cancel:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+:global(.dark .restore-btn-cancel) {
+  border-color: rgba(255, 255, 255, 0.15);
+}
+:global(.dark .restore-btn-cancel:hover) {
+  background: rgba(255, 255, 255, 0.07);
+}
+.restore-btn-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 18px;
+  border: none;
+  border-radius: 6px;
+  background: #00897b;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, opacity 0.15s;
+}
+.restore-btn-confirm:hover {
+  background: #00796b;
+}
+.restore-btn-confirm:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* step hint */
+.restore-step-hint {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 400;
+  opacity: 0.4;
+}
+
+/* step 2: wider dialog */
+.restore-dialog-wide {
+  width: 680px;
+}
+
+/* diff file tabs */
+.restore-diff-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 16px;
+  border-bottom: 1px solid rgba(0,0,0,0.07);
+  background: rgba(0,0,0,0.02);
+}
+:global(.dark .restore-diff-tabs) {
+  border-bottom-color: rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.02);
+}
+.restore-diff-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(0,0,0,0.12);
+  background: none;
+  color: inherit;
+  font-size: 12px;
+  font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: all 0.15s;
+}
+.restore-diff-tab:hover { opacity: 0.9; background: rgba(0,0,0,0.04); }
+.restore-diff-tab.active {
+  opacity: 1;
+  background: rgba(0,137,123,0.08);
+  border-color: rgba(0,137,123,0.35);
+  color: #00695c;
+}
+:global(.dark .restore-diff-tab) { border-color: rgba(255,255,255,0.12); }
+:global(.dark .restore-diff-tab.active) {
+  background: rgba(77,182,172,0.12);
+  border-color: rgba(77,182,172,0.35);
+  color: #4db6ac;
+}
+.restore-diff-tab.unchanged { opacity: 0.35; }
+.diff-tab-del { color: #d32f2f; font-weight: 600; font-size: 11px; }
+.diff-tab-add { color: #2e7d32; font-weight: 600; font-size: 11px; }
+:global(.dark .diff-tab-del) { color: #ef9a9a; }
+:global(.dark .diff-tab-add) { color: #81c784; }
+.diff-tab-same { font-size: 10px; opacity: 0.45; }
+
+/* diff body */
+.restore-diff-body {
+  overflow-y: auto;
+  max-height: 380px;
+  min-height: 120px;
+  font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.diff-unchanged {
+  padding: 32px;
+  text-align: center;
+  font-size: 13px;
+  opacity: 0.45;
+  font-family: inherit;
+}
+.diff-view-wrap { display: flex; flex-direction: column; }
+.diff-line {
+  display: flex;
+  white-space: pre;
+  min-height: 18px;
+}
+.diff-line.diff-add { background: rgba(46,125,50,0.1); }
+.diff-line.diff-del { background: rgba(211,47,47,0.09); }
+.diff-line.diff-fold { background: rgba(0,0,0,0.03); opacity: 0.5; }
+:global(.dark .diff-line.diff-add) { background: rgba(129,199,132,0.1); }
+:global(.dark .diff-line.diff-del) { background: rgba(239,154,154,0.1); }
+:global(.dark .diff-line.diff-fold) { background: rgba(255,255,255,0.03); }
+.diff-sign {
+  flex-shrink: 0;
+  width: 20px;
+  text-align: center;
+  user-select: none;
+  font-weight: 700;
+}
+.diff-line.diff-add .diff-sign { color: #2e7d32; }
+.diff-line.diff-del .diff-sign { color: #d32f2f; }
+.diff-line.diff-fold .diff-sign { color: transparent; }
+:global(.dark .diff-line.diff-add .diff-sign) { color: #81c784; }
+:global(.dark .diff-line.diff-del .diff-sign) { color: #ef9a9a; }
+.diff-text {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-all;
+  padding-right: 12px;
+}
+.diff-fold-text {
+  flex: 1;
+  text-align: center;
+  font-size: 11px;
+  opacity: 0.55;
+  padding: 0 8px;
 }
 </style>

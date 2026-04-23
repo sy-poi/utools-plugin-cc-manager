@@ -193,6 +193,8 @@ export function useDisplayMessages(sessionContent) {
   return computed(() => {
     const raw = sessionContent.value.filter(item => {
       const type = item.type
+      // TODO: 快照功能待完善，暂时隐藏。恢复时改为：!item.isSnapshotUpdate && Object.keys(item.snapshot?.trackedFileBackups || {}).length > 0
+      if (type === 'file-history-snapshot') return false
       if (type !== 'user' && type !== 'assistant' && type !== 'system') return false
       if (type === 'system') {
         const content = item.message?.content
@@ -233,6 +235,16 @@ export function useDisplayMessages(sessionContent) {
     }
 
     for (const item of raw) {
+      if (item.type === 'file-history-snapshot') {
+        merged.push({
+          uuid: item.messageId + '-snap',
+          timestamp: item.snapshot?.timestamp,
+          isSnapshot: true,
+          snapshotData: item.snapshot,
+          _stats: { input_tokens: 0, output_tokens: 0, cache_creation: 0, cache_read: 0, model: '', stop_reason: '', durationMs: 0 }
+        })
+        continue
+      }
       const msg = item.message || {}
       const role = msg.role || item.type
       const content = msg.content
@@ -256,6 +268,16 @@ export function useDisplayMessages(sessionContent) {
       // 合并方式：将所有 text block 转为 { type: 'meta', text } 追加到前一条 user 的 content 中。
       // 还原方式：删除此 if 块即可恢复 isMeta 消息为独立用户消息。
       const isMetaInjection = role === 'user' && !!item.isMeta
+
+      if (item.isCompactSummary) {
+        merged.push({
+          ...item,
+          message: { ...msg, content: [...blocks] },
+          isCompactSummary: true,
+          _stats: { input_tokens: 0, output_tokens: 0, cache_creation: 0, cache_read: 0, model: '', stop_reason: '', durationMs: 0 }
+        })
+        continue
+      }
 
       if (merged.length > 0) {
         const prev = merged[merged.length - 1]

@@ -29,12 +29,17 @@ pnpm build    # 构建到 dist/ 目录
 
 `public/preload/services.js` — CommonJS 模块，通过 `window.services` 暴露 API 给渲染进程：
 
-- `getAllProjects()` — 扫描 `~/.claude/projects/`，返回项目和会话列表
+- `getProjectsQuick()` — 快速扫描所有项目，每个项目只读最新文件取 cwd，不加载完整会话列表
+- `loadProjectSessions(projectPath)` — 加载指定项目的完整会话列表，含 subagents 扫描
+- `getAllProjects()` — 扫描 `~/.claude/projects/`，返回项目和会话列表（完整版，懒加载后备）
 - `readSessionFile()` / `watchSessionFile()` — 读取和监听 JSONL 会话文件
-- `deleteSession()` / `renameSession()` / `forkSession()` — 会话 CRUD 操作
+- `deleteSession()` / `renameSession()` / `forkSession()` — 会话 CRUD 操作；重命名/fork 时同步更新 agent-name 字段
+- `forkSummarySession(sourceFilePath, summaryUuid, title)` — 以上下文压缩摘要为起点创建新会话分支
 - `resumeSession()` — 跨平台在新终端窗口中恢复会话
 - `toggleFavorite()` — 切换会话收藏状态
 - `parseJsonl()` — 兼容标准单行和美化多行两种 JSONL 格式
+- `getSnapshotFileContents(sessionFilePath, selectedBackups)` — 读取快照备份内容与当前磁盘内容，供 diff 预览
+- `restoreSnapshot(sessionFilePath, trackedFileBackups)` — 将文件恢复到指定快照时的状态
 - `saveText()` / `saveImage()` — 导出文件保存
 
 ### 渲染层（Vue）
@@ -64,10 +69,13 @@ pnpm build    # 构建到 dist/ 目录
 ### uTools 集成
 
 - `public/plugin.json` — 插件配置，feature code `sessions`，关键词"CC会话管理"
+- `public/window.html` — 开发模式下新窗口的中转页，`location.replace` 跳转到 Vite 地址
 - 开发模式 `main` 指向 `http://localhost:5173`
 - `window.utools.dbStorage` 持久化用户设置（key: `terminalCommand`）
 - `window.utools.shellOpenPath()` 打开项目目录
 - `window.utools.shellShowItemInFolder()` 定位文件
+- `window.utools.createBrowserWindow()` 在独立窗口中打开会话；通过 `localStorage.__cc_pending_session` 传递会话信息，通过 `BroadcastChannel('cc-session')` 同步删除事件
+- `window.utools.getWindowType()` 判断当前窗口是主窗口还是独立会话窗口（返回 `'browser'` 时为独立窗口）
 
 ### 样式规范：亮色/暗色双主题
 
@@ -80,11 +88,14 @@ pnpm build    # 构建到 dist/ 目录
 
 - Composables 中 `useSnackbar` 和 `useTheme` 使用模块级 `ref()` 实现跨组件单例共享状态
 - 消息合并逻辑：连续 assistant 消息、tool_result 响应、sourceToolUseID/sourceToolAssistantUUID 工具响应、系统注入文本都会合并到前一个 assistant 消息中；isMeta 命令注入消息合并到前一个 user 消息中作为 `type: 'meta'` 块。合并时在 merged message 上记录 `lastUuid`（最后一条被合并的原始 item 的 uuid），供 fork 等功能定位截断点
+- `isCompactSummary` 消息直接 push 为独立节点，不参与合并，在 SessionView 中以"上下文压缩"块展示
 - 系统注入判定：`isSystemText(text)` 函数判断文本是否为系统生成内容（以 `[` 或 `<` 开头）。该函数在 `preload/services.js` 和 `src/composables/useMessageParser.js` 中各有一份，修改时必须同步更新两处。注意：含 `<command-name>` 的消息是用户命令，不算系统事件
-- 工具调用渲染：tool_use 与 tool_result 按 ID 配对，默认折叠，点击展开
+- 工具调用渲染：tool_use 与 tool_result 按 ID 配对，默认折叠，点击展开；若工具调用对应子对话，卡片头部显示"查看"链接（通过 `agentToolUseMap` computed 建立 toolUseId → subagent 映射）
 - Edit 工具的 diff 使用 LCS 算法 + 内联差异高亮，结果通过 WeakMap 缓存
 - 导出架构：图片和 HTML 导出共用 DOM 克隆方案（`prepareExportClone()` + `serializeToHtml()`），不维护独立的 HTML 模板和样式。`collectPageStyles()` 收集页面 CSS 时会过滤无关规则（sidebar/dialog 等）并剥除 `data-v-xxx` scoped 选择器，末尾追加覆盖规则确保独立 HTML 正常居中滚动
 - `DeleteConfirmDialog` 的 `showHint` prop 控制是否显示 Ctrl 跳过提示：Sidebar 调用时传 event（showHint=true），SessionView 调用时不传 event（showHint=false）
+- 项目懒加载：`loadProjects()` 调用 `getProjectsQuick()` 仅加载项目元数据；`loadProjectSessionsFor(name)` 在展开项目或搜索时按需加载完整会话列表
+- Subagent 文件存放在 `<projectDir>/<sessionUuid>/subagents/agent-<agentId>.jsonl`，名称优先读 `agent-<agentId>.meta.json` 中的 `description` 字段
 
 ### 更新日志规范
 

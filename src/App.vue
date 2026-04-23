@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, onMounted, nextTick, watch, computed } from 'vue'
 import { useTheme } from './composables/useTheme'
 import { useSnackbar } from './composables/useSnackbar'
 import { useDisplayMessages } from './composables/useMessageParser'
@@ -27,9 +27,34 @@ const searchQuery = ref('')
 const sidebarCollapsed = ref(false)
 const showSettings = ref(false)
 const terminalCommand = ref(window.utools.dbStorage.getItem('terminalCommand') || 'claude')
+const isStandaloneWindow = ref(false)
+const sessionBroadcast = new BroadcastChannel('cc-session')
 
 // Computed
 const displayMessages = useDisplayMessages(sessionContent)
+
+// 当前会话中 toolUseId → subagent session 的映射，用于在工具调用卡片上显示"查看"链接
+const agentToolUseMap = computed(() => {
+  if (!selectedSession.value || selectedSession.value.isSubagent) return {}
+  const subagents = selectedSession.value.subagents
+  if (!subagents?.length) return {}
+  const agentById = {}
+  for (const sub of subagents) agentById[sub.agentId] = sub
+  const map = {}
+  for (const item of sessionContent.value) {
+    const agentId = item.toolUseResult?.agentId
+    if (!agentId || !agentById[agentId]) continue
+    const content = item.message?.content
+    if (!Array.isArray(content)) continue
+    for (const block of content) {
+      if (block.type === 'tool_result' && block.tool_use_id) {
+        map[block.tool_use_id] = agentById[agentId]
+        break
+      }
+    }
+  }
+  return map
+})
 
 // Refs
 const sessionViewRef = ref(null)
@@ -40,34 +65,99 @@ const renameDialog = ref({ show: false, session: null })
 const deleteConfirm = ref({ show: false, session: null, showHint: true })
 const batchDeleteConfirm = ref({ show: false, paths: [] })
 const forkDialog = ref({ show: false, item: null })
+const forkResumeConfirm = ref({ show: false, sessionId: null, cwd: null })
 const imagePreview = ref({ show: false, src: '', mediaType: '' })
 
 // Project/session operations
-function loadProjects() {
+// force=true 时清空旧 sessions（手动刷新，展示加载效果）；默认静默刷新不闪烁
+function loadProjects(force = false) {
+  const prevMap = {}
+  for (const p of projects.value) {
+    prevMap[p.name] = p
+  }
   try {
-    projects.value = window.services.getAllProjects()
+    const quickProjects = window.services.getProjectsQuick()
+    projects.value = quickProjects.map(p => {
+      const prev = prevMap[p.name]
+      const keep = !force && prev?.sessionsLoaded
+      return {
+        ...p,
+        sessions: keep ? prev.sessions : [],
+        sessionsLoaded: keep,
+        sessionsLoading: false
+      }
+    })
   } catch (error) {
     console.error('Failed to load projects:', error)
     showSnackbar('加载项目失败', 'error')
   }
   projectsLoaded.value = true
+  for (const p of projects.value) {
+    if (p.sessionsLoaded || expandedProjects.value[p.name]) {
+      loadProjectSessionsFor(p.name)
+    }
+  }
+}
+
+// 异步懒加载某个项目的完整会话列表
+function loadProjectSessionsFor(name) {
+  const idx = projects.value.findIndex(p => p.name === name)
+  if (idx < 0) return
+  if (projects.value[idx].sessionsLoading) return
+  projects.value = projects.value.map((p, i) =>
+    i === idx ? { ...p, sessionsLoading: true } : p
+  )
+  setTimeout(() => {
+    const currentIdx = projects.value.findIndex(p => p.name === name)
+    if (currentIdx < 0) return
+    const result = window.services.loadProjectSessions(projects.value[currentIdx].path)
+    const sessions = result.sessions || []
+    projects.value = projects.value.map((p, i) =>
+      i === currentIdx ? { ...p, sessions, sessionsLoaded: true, sessionsLoading: false } : p
+    )
+    // 更新选中会话名称
+    if (selectedSession.value) {
+      const s = sessions.find(s => s.path === selectedSession.value.path)
+      if (s) selectedSession.value = { ...selectedSession.value, name: s.name }
+    }
+  }, 0)
 }
 
 function openProjectDir(project) {
-  const cwd = project.sessions[0]?.cwd
+  const cwd = project.cwd || project.sessions[0]?.cwd
   if (cwd) window.utools.shellOpenPath(cwd)
 }
 
 function toggleProject(name) {
   expandedProjects.value[name] = !expandedProjects.value[name]
+  if (expandedProjects.value[name]) {
+    const project = projects.value.find(p => p.name === name)
+    if (project && !project.sessionsLoaded && !project.sessionsLoading) {
+      loadProjectSessionsFor(name)
+    }
+  }
 }
 
 function toggleAllProjects() {
   const expand = !projects.value.every(p => expandedProjects.value[p.name])
   for (const p of projects.value) {
     expandedProjects.value[p.name] = expand
+    if (expand && !p.sessionsLoaded && !p.sessionsLoading) {
+      loadProjectSessionsFor(p.name)
+    }
   }
 }
+
+// 搜索时自动加载所有未加载项目的会话
+watch(searchQuery, (q) => {
+  if (q && q.trim()) {
+    for (const p of projects.value) {
+      if (!p.sessionsLoaded && !p.sessionsLoading) {
+        loadProjectSessionsFor(p.name)
+      }
+    }
+  }
+})
 
 function loadSessionContent(path, autoScroll = false) {
   const view = sessionViewRef.value
@@ -84,6 +174,9 @@ function loadSessionContent(path, autoScroll = false) {
 
 function selectSession(session) {
   selectedSession.value = session
+  if (session.isSubagent) {
+    sidebarRef.value?.expandSubagents(session.parentSessionPath)
+  }
   loading.value = true
   loadSessionContent(session.path)
   loading.value = false
@@ -103,7 +196,7 @@ function selectSession(session) {
 }
 
 function refresh() {
-  loadProjects()
+  loadProjects(true)
   showSnackbar('已刷新')
 }
 
@@ -121,11 +214,18 @@ function doDelete(session) {
   const result = window.services.deleteSession(session.path)
   if (result.success) {
     showSnackbar('会话已删除')
-    if (selectedSession.value?.path === session.path) {
+    if (selectedSession.value?.path === session.path ||
+        selectedSession.value?.parentSessionPath === session.path) {
       window.services.unwatchSessionFile()
       selectedSession.value = null
       sessionContent.value = []
+      if (isStandaloneWindow.value) {
+        sessionBroadcast.postMessage({ action: 'delete', path: session.path })
+        window.close()
+        return
+      }
     }
+    sessionBroadcast.postMessage({ action: 'delete', path: session.path })
     loadProjects()
   } else {
     showSnackbar(result.error || '删除失败', 'error')
@@ -143,7 +243,8 @@ function doBatchDelete() {
   const result = window.services.batchDeleteSessions(paths)
   if (result.deleted > 0) {
     showSnackbar(`已删除 ${result.deleted} 个会话`)
-    if (selectedSession.value && paths.includes(selectedSession.value.path)) {
+    if (selectedSession.value && (paths.includes(selectedSession.value.path) ||
+        paths.includes(selectedSession.value.parentSessionPath))) {
       window.services.unwatchSessionFile()
       selectedSession.value = null
       sessionContent.value = []
@@ -173,29 +274,49 @@ function confirmRename(newName) {
 
 // Fork
 function startFork(item) {
-  forkDialog.value = { show: true, item }
+  forkDialog.value = { show: true, item, isSummary: false }
+}
+
+function startSummaryFork(item) {
+  forkDialog.value = { show: true, item, isSummary: true }
 }
 
 function confirmFork(name) {
-  const item = forkDialog.value.item
-  const itemUuid = item.uuid
-  const cutoffUuid = item.lastUuid || itemUuid
-  const result = window.services.forkSession(selectedSession.value.path, cutoffUuid, name)
+  const { item, isSummary } = forkDialog.value
+  const cwd = selectedSession.value?.cwd || ''
+  let result
+  if (isSummary) {
+    result = window.services.forkSummarySession(selectedSession.value.path, item.uuid, name)
+  } else {
+    const cutoffUuid = item.lastUuid || item.uuid
+    result = window.services.forkSession(selectedSession.value.path, cutoffUuid, name)
+  }
   if (result.success) {
-    showSnackbar('Fork 成功')
     loadProjects()
+    forkResumeConfirm.value = { show: true, sessionId: result.sessionId, cwd }
   } else {
     showSnackbar(result.error || 'Fork 失败', 'error')
   }
   forkDialog.value.show = false
 }
 
-// Resume
-function resumeSession() {
-  const session = selectedSession.value
-  if (!session?.sessionId) return
+function resumeForkedSession() {
+  const { sessionId, cwd } = forkResumeConfirm.value
   try {
-    window.services.resumeSession(session.sessionId, session.cwd || '', terminalCommand.value)
+    window.services.resumeSession(sessionId, cwd, terminalCommand.value)
+    showSnackbar('已在终端中打开')
+  } catch (e) {
+    showSnackbar('打开终端失败', 'error')
+  }
+  forkResumeConfirm.value.show = false
+}
+
+// Resume
+function resumeSession(session) {
+  const s = session || selectedSession.value
+  if (!s?.sessionId) return
+  try {
+    window.services.resumeSession(s.sessionId, s.cwd || '', terminalCommand.value)
     showSnackbar('已在终端中打开')
   } catch (e) {
     showSnackbar('打开终端失败', 'error')
@@ -217,14 +338,78 @@ function openImagePreview(src, mediaType) {
   imagePreview.value = { show: true, src, mediaType }
 }
 
+// 在新窗口中打开会话
+// 通过 localStorage 传递会话数据，子窗口 onMounted 时读取
+// 在新窗口中打开会话
+// dev 模式直接传 vite 地址，prod 模式用相对路径 index.html
+// 通过 localStorage 传递会话数据，子窗口 onMounted 时读取
+function openSessionWindow(session) {
+  if (typeof window.utools?.createBrowserWindow !== 'function') {
+    showSnackbar('当前 uTools 版本不支持多窗口', 'error')
+    return
+  }
+  const isDev = window.location.protocol !== 'file:'
+  try {
+    localStorage.setItem('__cc_pending_session', JSON.stringify(session))
+    // dev: window.html 内含 location.replace 跳转到 vite，show:true 立即显示避免时序问题
+    // prod: index.html 直接加载完整 app，callback 里再 show 避免白屏闪烁
+    const win = window.utools.createBrowserWindow(isDev ? 'window.html' : 'index.html', {
+      title: session.name || '会话详情',
+      width: 960,
+      height: 700,
+      minWidth: 600,
+      minHeight: 400,
+      show: isDev,
+      webPreferences: { preload: 'preload/services.js' }
+    }, () => {
+      if (!isDev) win.show()
+    })
+  } catch (e) {
+    localStorage.removeItem('__cc_pending_session')
+    showSnackbar('打开失败: ' + (e?.message || String(e)), 'error')
+  }
+}
+
 // Lifecycle
 onMounted(() => {
+  const windowType = window.utools.getWindowType?.() || 'main'
+  if (windowType === 'browser') {
+    isStandaloneWindow.value = true
+    initThemeListener()
+    const stored = localStorage.getItem('__cc_pending_session')
+    if (stored) {
+      localStorage.removeItem('__cc_pending_session')
+      try {
+        const session = JSON.parse(stored)
+        selectSession(session)
+        nextTick(() => { document.title = session.name || '会话详情' })
+      } catch (e) {}
+    }
+    sessionBroadcast.onmessage = ({ data }) => {
+      if (data.action === 'delete' && (
+        selectedSession.value?.path === data.path ||
+        selectedSession.value?.parentSessionPath === data.path
+      )) window.close()
+    }
+    return
+  }
   window.utools.onPluginEnter(({ code }) => {
     if (code === 'sessions') loadProjects()
   })
   window.utools.onPluginOut(() => {
     window.services.unwatchSessionFile()
   })
+  sessionBroadcast.onmessage = ({ data }) => {
+    if (data.action === 'delete') {
+      if (selectedSession.value?.path === data.path ||
+          selectedSession.value?.parentSessionPath === data.path) {
+        window.services.unwatchSessionFile()
+        selectedSession.value = null
+        sessionContent.value = []
+      }
+      loadProjects()
+    }
+  }
   initThemeListener()
 })
 </script>
@@ -232,6 +417,7 @@ onMounted(() => {
 <template>
   <div class="app" :class="{ dark: isDark }">
     <Sidebar
+      v-if="!isStandaloneWindow"
       ref="sidebarRef"
       :projects="projects"
       :expanded-projects="expandedProjects"
@@ -249,10 +435,12 @@ onMounted(() => {
       @open-project-dir="openProjectDir"
       @refresh="refresh"
       @open-settings="showSettings = true"
+      @open-session-window="openSessionWindow"
+      @resume-session="resumeSession"
     />
 
     <!-- 侧边栏收起/展开按钮 -->
-    <button class="sidebar-toggle" @click="sidebarCollapsed = !sidebarCollapsed" :title="sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'">
+    <button v-if="!isStandaloneWindow" class="sidebar-toggle" @click="sidebarCollapsed = !sidebarCollapsed" :title="sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'">
       <IconChevronLeft v-if="!sidebarCollapsed" />
       <IconChevronRight v-else />
     </button>
@@ -264,12 +452,17 @@ onMounted(() => {
         :session="selectedSession"
         :display-messages="displayMessages"
         :loading="loading"
+        :agent-tool-use-map="agentToolUseMap"
+        :standalone="isStandaloneWindow"
         @fork="startFork"
+        @fork-summary="startSummaryFork"
         @resume="resumeSession"
         @preview-image="openImagePreview"
         @rename="startRename"
         @delete="handleDelete"
         @toggle-favorite="toggleFavoriteFromView"
+        @select-session="selectSession"
+        @open-session-window="openSessionWindow"
       />
     </main>
 
@@ -299,9 +492,24 @@ onMounted(() => {
 
     <ForkDialog
       :show="forkDialog.show"
+      :desc="forkDialog.isSummary ? '仅保留此条上下文压缩记录，创建新的会话分支' : '从当前 AI 消息处截断，创建新的会话分支'"
       @confirm="confirmFork"
       @cancel="forkDialog.show = false"
     />
+
+    <Transition name="fade">
+      <div v-if="forkResumeConfirm.show" class="fork-resume-overlay" @click.self="forkResumeConfirm.show = false">
+        <div class="fork-resume-card">
+          <div class="fork-resume-check">✓</div>
+          <h3 class="fork-resume-title">Fork 成功</h3>
+          <p class="fork-resume-desc">是否立即在终端中打开新会话？</p>
+          <div class="fork-resume-actions">
+            <button class="fork-resume-btn cancel" @click="forkResumeConfirm.show = false">稍后再说</button>
+            <button class="fork-resume-btn confirm" @click="resumeForkedSession">立即打开</button>
+          </div>
+        </div>
+      </div>
+    </Transition>
 
     <ImagePreview
       :show="imagePreview.show"
@@ -375,4 +583,76 @@ onMounted(() => {
   min-width: 0;
   position: relative;
 }
+
+.fork-resume-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.fork-resume-card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 28px 24px 24px;
+  width: 320px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+  text-align: center;
+}
+.dark .fork-resume-card {
+  background: #2a2a2a;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+.fork-resume-check {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: #e8f5e9;
+  color: #43a047;
+  font-size: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 12px;
+}
+.dark .fork-resume-check {
+  background: rgba(67,160,71,0.2);
+}
+.fork-resume-title {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 600;
+}
+.fork-resume-desc {
+  margin: 0 0 20px;
+  font-size: 13px;
+  opacity: 0.6;
+}
+.fork-resume-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+}
+.fork-resume-btn {
+  padding: 7px 20px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.fork-resume-btn.cancel {
+  background: rgba(0,0,0,0.06);
+  color: inherit;
+}
+.dark .fork-resume-btn.cancel {
+  background: rgba(255,255,255,0.1);
+}
+.fork-resume-btn.confirm {
+  background: #1976d2;
+  color: #fff;
+}
+.fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
 </style>

@@ -1,6 +1,6 @@
 <script setup>
-import { computed, ref } from 'vue'
-import { IconSettings, IconSearch, IconClose, IconCollapseAll, IconExpandAll, IconRefresh, IconFolder, IconOpenExternal, IconFile, IconEdit, IconDelete, IconSun, IconMoon, IconStar, IconStarOutline, IconCheckbox, IconCheckboxChecked } from './icons'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
+import { IconSettings, IconSearch, IconClose, IconCollapseAll, IconExpandAll, IconRefresh, IconFolder, IconOpenExternal, IconFile, IconEdit, IconDelete, IconSun, IconMoon, IconStar, IconStarOutline, IconCheckbox, IconCheckboxChecked, IconSubagent, IconMore, IconTerminal } from './icons'
 import { useTheme } from '../composables/useTheme'
 import { useSnackbar } from '../composables/useSnackbar'
 import { formatTime, formatSize, shortenPath } from '../composables/useFormat'
@@ -24,7 +24,9 @@ const emit = defineEmits([
   'open-project-dir',
   'refresh',
   'open-settings',
-  'batch-delete'
+  'batch-delete',
+  'open-session-window',
+  'resume-session'
 ])
 
 const { isDark, toggleTheme } = useTheme()
@@ -61,7 +63,23 @@ function clearMultiSelect() {
   multiSelectMode.value = false
 }
 
-defineExpose({ clearMultiSelect })
+function expandSubagents(sessionPath) {
+  if (!sessionPath) return
+  const s = new Set(expandedSubagents.value)
+  s.add(sessionPath)
+  expandedSubagents.value = s
+}
+
+defineExpose({ clearMultiSelect, expandSubagents })
+
+// Subagent expand/collapse
+const expandedSubagents = ref(new Set())
+function toggleSubagents(sessionPath) {
+  const s = new Set(expandedSubagents.value)
+  if (s.has(sessionPath)) s.delete(sessionPath)
+  else s.add(sessionPath)
+  expandedSubagents.value = s
+}
 
 // Favorite toggle
 function toggleFavorite(session, event) {
@@ -69,6 +87,66 @@ function toggleFavorite(session, event) {
   const result = window.services.toggleFavorite(session.path)
   if (result.success) emit('refresh')
 }
+
+// Session item dropdown menu
+const sidebarMenu = ref({ session: null, style: {} })
+
+function openMenu(session, event) {
+  event.stopPropagation()
+  if (event.type === 'contextmenu') {
+    // 右键：菜单左边缘对齐鼠标，向右展开
+    sidebarMenu.value = { session, style: { left: event.clientX + 'px', top: event.clientY + 'px' } }
+  } else {
+    // 按钮点击：菜单右边缘对齐按钮右侧
+    const rect = event.currentTarget.getBoundingClientRect()
+    sidebarMenu.value = { session, style: { right: (window.innerWidth - rect.right) + 'px', top: (rect.bottom + 4) + 'px' } }
+  }
+}
+
+function closeMenu() {
+  sidebarMenu.value.session = null
+}
+
+function menuOpenWindow() {
+  const s = sidebarMenu.value.session; closeMenu()
+  emit('open-session-window', s)
+}
+
+function menuResume() {
+  const s = sidebarMenu.value.session; closeMenu()
+  emit('resume-session', s)
+}
+
+function menuToggleFavorite() {
+  const s = sidebarMenu.value.session; closeMenu()
+  const result = window.services.toggleFavorite(s.path)
+  if (result.success) emit('refresh')
+}
+
+function menuRename() {
+  const s = sidebarMenu.value.session; closeMenu()
+  emit('rename-session', s)
+}
+
+function menuDelete(event) {
+  const s = sidebarMenu.value.session; closeMenu()
+  emit('delete-session', s, event)
+}
+
+const ctrlHeld = ref(false)
+function onKeyDown(e) { if (e.key === 'Control' || e.key === 'Meta') ctrlHeld.value = true }
+function onKeyUp(e) { if (e.key === 'Control' || e.key === 'Meta') ctrlHeld.value = false }
+
+onMounted(() => {
+  document.addEventListener('click', closeMenu)
+  document.addEventListener('keydown', onKeyDown)
+  document.addEventListener('keyup', onKeyUp)
+})
+onUnmounted(() => {
+  document.removeEventListener('click', closeMenu)
+  document.removeEventListener('keydown', onKeyDown)
+  document.removeEventListener('keyup', onKeyUp)
+})
 
 const allExpanded = computed(() => {
   return props.projects.length > 0 && props.projects.every(p => props.expandedProjects[p.name])
@@ -92,7 +170,7 @@ const filteredProjects = computed(() => {
   // Sort favorited sessions to top within each project
   return result.map(p => ({
     ...p,
-    sessions: [...p.sessions].sort((a, b) => (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0))
+    sessions: [...p.sessions].sort((a, b) => (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0)),
   }))
 })
 </script>
@@ -146,20 +224,30 @@ const filteredProjects = computed(() => {
             <span class="expand-icon">{{ expandedProjects[project.name] ? '▾' : '▸' }}</span>
             <IconFolder class="folder-icon" />
             <span class="project-name" :title="project.displayName">{{ shortenPath(project.displayName) }}</span>
-            <span class="session-count">{{ project.sessions.length }}</span>
-            <button v-if="project.sessions[0]?.cwd" class="project-open-btn" @click.stop="emit('open-project-dir', project)" title="打开目录">
+            <span class="session-count">{{ project.sessionsLoaded ? project.sessions.length : project.sessionCount }}</span>
+            <button v-if="project.cwd || project.sessions[0]?.cwd" class="project-open-btn" @click.stop="emit('open-project-dir', project)" title="打开目录">
               <IconOpenExternal />
             </button>
           </div>
           <div v-if="expandedProjects[project.name] || searchQuery?.trim()" class="session-list">
-            <template v-if="project.sessions.length > 0">
+            <div v-if="project.sessionsLoading && project.sessions.length === 0" class="sessions-loading">
+              <div class="sidebar-spinner"></div>
+            </div>
+            <template v-else-if="project.sessions.length > 0">
+              <template v-for="session in project.sessions" :key="session.path">
               <div
-                v-for="session in project.sessions"
-                :key="session.path"
                 class="session-item"
-                :class="{ selected: selectedSession?.path === session.path }"
+                :class="{ selected: selectedSession?.path === session.path, 'has-subtoggle': session.subagents?.length }"
                 @click="emit('select-session', session)"
+                @contextmenu.prevent="openMenu(session, $event)"
               >
+                <!-- 子对话展开箭头 / 对齐占位 -->
+                <span
+                  v-if="session.subagents?.length"
+                  class="session-sub-toggle"
+                  @click.stop="toggleSubagents(session.path)"
+                  :title="expandedSubagents.has(session.path) ? '收起子对话' : '展开子对话'"
+                >{{ expandedSubagents.has(session.path) ? '▾' : '▸' }}</span>
                 <!-- 文件图标 / 复选框 -->
                 <span v-if="multiSelectMode || selectedPaths.has(session.path)" class="multi-check" @click.stop="toggleSelect(session)">
                   <IconCheckboxChecked v-if="selectedPaths.has(session.path)" style="color: #1976d2" />
@@ -177,18 +265,33 @@ const filteredProjects = computed(() => {
                   <span class="session-meta">{{ formatSize(session.size) }} · {{ formatTime(session.timestamp) }}</span>
                 </div>
                 <div v-if="!multiSelectMode" class="session-actions">
-                  <button class="action-btn" @click.stop="toggleFavorite(session, $event)" :title="session.isFavorite ? '取消收藏' : '收藏'">
-                    <IconStar v-if="session.isFavorite" style="color: #ff9800" />
-                    <IconStarOutline v-else />
-                  </button>
-                  <button class="action-btn" @click.stop="emit('rename-session', session, $event)" title="重命名">
-                    <IconEdit />
-                  </button>
-                  <button class="action-btn delete" @click.stop="emit('delete-session', session, $event)" title="删除">
-                    <IconDelete />
+                  <button class="action-btn" @click.stop="openMenu(session, $event)" title="更多操作">
+                    <IconMore />
                   </button>
                 </div>
               </div>
+              <!-- 子对话列表 -->
+              <template v-if="session.subagents?.length && expandedSubagents.has(session.path)">
+                <div
+                  v-for="sub in session.subagents"
+                  :key="sub.path"
+                  class="subagent-item"
+                  :class="{ selected: selectedSession?.path === sub.path }"
+                  @click="emit('select-session', sub)"
+                >
+                  <IconSubagent class="subagent-icon" />
+                  <div class="session-info">
+                    <span class="session-name">{{ sub.name }}</span>
+                    <span class="session-meta">{{ formatSize(sub.size) }}</span>
+                  </div>
+                  <div class="session-actions">
+                    <button class="action-btn" @click.stop="emit('open-session-window', sub)" title="新窗口打开">
+                      <IconOpenExternal />
+                    </button>
+                  </div>
+                </div>
+              </template>
+              </template>
             </template>
             <div v-else class="empty-sessions">暂无会话</div>
           </div>
@@ -205,6 +308,39 @@ const filteredProjects = computed(() => {
       </div>
     </div>
   </aside>
+
+  <!-- 会话操作下拉菜单（fixed 定位，不受 overflow 裁剪） -->
+  <Transition name="menu-fade">
+    <div
+      v-if="sidebarMenu.session"
+      class="sidebar-item-menu"
+      :style="sidebarMenu.style"
+      @click.stop
+    >
+      <button @click="menuOpenWindow">
+        <IconOpenExternal :size="13" />
+        <span>新窗口打开</span>
+      </button>
+      <button v-if="sidebarMenu.session?.sessionId" @click="menuResume">
+        <IconTerminal :size="13" />
+        <span>在终端中恢复</span>
+      </button>
+      <button @click="menuToggleFavorite">
+        <IconStar v-if="sidebarMenu.session.isFavorite" :size="13" style="color: #ff9800" />
+        <IconStarOutline v-else :size="13" />
+        <span>{{ sidebarMenu.session.isFavorite ? '取消收藏' : '收藏' }}</span>
+      </button>
+      <button @click="menuRename">
+        <IconEdit :size="13" />
+        <span>重命名</span>
+      </button>
+      <div class="sidebar-item-menu-divider"></div>
+      <button class="menu-danger" :class="{ 'menu-danger-direct': ctrlHeld }" @click="menuDelete($event)">
+        <IconDelete :size="13" />
+        <span>{{ ctrlHeld ? '直接删除' : '删除' }}</span>
+      </button>
+    </div>
+  </Transition>
 </template>
 
 <style scoped>
@@ -445,10 +581,13 @@ const filteredProjects = computed(() => {
 .session-item {
   display: flex;
   align-items: center;
-  padding: 6px 10px 6px 20px;
+  padding: 6px 10px 6px 22px;
   border-radius: 8px;
   cursor: pointer;
   gap: 8px;
+}
+.session-item.has-subtoggle {
+  padding-left: 0;
 }
 .session-item:hover {
   background: rgba(0,0,0,0.04);
@@ -497,7 +636,8 @@ const filteredProjects = computed(() => {
   gap: 2px;
   flex-shrink: 0;
 }
-.session-item:hover .session-actions {
+.session-item:hover .session-actions,
+.subagent-item:hover .session-actions {
   display: flex;
 }
 .action-btn {
@@ -584,6 +724,53 @@ const filteredProjects = computed(() => {
   font-size: 13px;
   opacity: 0.5;
 }
+.sessions-loading {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0;
+}
+
+.session-sub-toggle {
+  width: 14px;
+  text-align: center;
+  font-size: 11px;
+  opacity: 0.5;
+  flex-shrink: 0;
+  cursor: pointer;
+  padding: 2px 0;
+  line-height: 1;
+}
+.session-sub-toggle:hover {
+  opacity: 1;
+}
+.subagent-item {
+  display: flex;
+  align-items: center;
+  padding: 5px 10px 5px 36px;
+  border-radius: 8px;
+  cursor: pointer;
+  gap: 8px;
+}
+.subagent-item:hover {
+  background: rgba(0,0,0,0.04);
+}
+.subagent-item.selected {
+  background: rgba(103, 58, 183, 0.1);
+}
+:global(.dark .subagent-item:hover) {
+  background: rgba(255,255,255,0.06);
+}
+:global(.dark .subagent-item.selected) {
+  background: rgba(179, 157, 219, 0.15);
+}
+.subagent-icon {
+  flex-shrink: 0;
+  color: #673ab7;
+  opacity: 0.8;
+}
+:global(.dark .subagent-icon) {
+  color: #b39ddb;
+}
 .sidebar-spinner {
   width: 24px;
   height: 24px;
@@ -616,4 +803,62 @@ const filteredProjects = computed(() => {
   opacity: 0.4;
   font-size: 12px;
 }
+
+.sidebar-item-menu {
+  position: fixed;
+  z-index: 9999;
+  background: #fff;
+  border: 1px solid rgba(0,0,0,0.12);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  min-width: 148px;
+  padding: 4px 0;
+}
+:global(.dark .sidebar-item-menu) {
+  background: #2a2a2a;
+  border-color: #444;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+.sidebar-item-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 14px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+}
+.sidebar-item-menu button:hover {
+  background: rgba(0,0,0,0.05);
+}
+:global(.dark .sidebar-item-menu button:hover) {
+  background: rgba(255,255,255,0.07);
+}
+.sidebar-item-menu .menu-danger {
+  color: #d32f2f;
+}
+:global(.dark .sidebar-item-menu .menu-danger) {
+  color: #ef9a9a;
+}
+.sidebar-item-menu .menu-danger-direct {
+  background: rgba(211, 47, 47, 0.08);
+}
+:global(.dark .sidebar-item-menu .menu-danger-direct) {
+  background: rgba(239, 154, 154, 0.1);
+}
+.sidebar-item-menu-divider {
+  height: 1px;
+  background: rgba(0,0,0,0.08);
+  margin: 4px 0;
+}
+:global(.dark .sidebar-item-menu-divider) {
+  background: rgba(255,255,255,0.1);
+}
+.menu-fade-enter-active, .menu-fade-leave-active { transition: opacity 0.12s, transform 0.12s; }
+.menu-fade-enter-from, .menu-fade-leave-to { opacity: 0; transform: scale(0.95); }
 </style>

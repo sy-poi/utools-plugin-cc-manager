@@ -68,6 +68,128 @@ function extractSessionName(items, fallbackName) {
   return fallbackName
 }
 
+// 快速扫描所有项目：每个项目只读最新一个文件取 cwd，不加载完整会话列表
+function getProjectsQuick() {
+  const projectsPath = getProjectsPath()
+  try {
+    if (!fs.existsSync(projectsPath)) return []
+    const projects = []
+    const projectDirs = fs.readdirSync(projectsPath)
+    for (const projectDir of projectDirs) {
+      const projectPath = path.join(projectsPath, projectDir)
+      const stat = fs.statSync(projectPath)
+      if (!stat.isDirectory()) continue
+      const jsonlFiles = fs.readdirSync(projectPath).filter(f => f.endsWith('.jsonl'))
+      if (jsonlFiles.length === 0) continue
+      // stat 所有文件找最新修改时间和最近修改的文件
+      let latestMtime = new Date(0)
+      let newestFile = null
+      let newestMtime = new Date(0)
+      for (const file of jsonlFiles) {
+        const m = fs.statSync(path.join(projectPath, file)).mtime
+        if (m > latestMtime) latestMtime = m
+        if (m > newestMtime) { newestMtime = m; newestFile = file }
+      }
+      // 只读最新文件的前几条取 cwd
+      let cwd = ''
+      if (newestFile) {
+        try {
+          const content = fs.readFileSync(path.join(projectPath, newestFile), 'utf-8')
+          const items = parseJsonl(content)
+          for (const data of items.slice(0, 20)) {
+            if (data.cwd) { cwd = data.cwd; break }
+          }
+        } catch (e) {}
+      }
+      projects.push({
+        name: projectDir,
+        displayName: cwd || projectDir,
+        cwd,
+        path: projectPath,
+        sessionCount: jsonlFiles.length,
+        sessions: [],
+        sessionsLoaded: false,
+        sessionsLoading: false,
+        latestMtime
+      })
+    }
+    return projects.sort((a, b) => b.latestMtime - a.latestMtime)
+  } catch (error) {
+    console.error('Error reading projects:', error)
+    return []
+  }
+}
+
+// 加载指定项目的完整会话列表（含 subagents）
+function loadProjectSessions(projectPath) {
+  try {
+    const files = fs.readdirSync(projectPath).filter(f => f.endsWith('.jsonl'))
+    const sessions = files.map(file => {
+      const filePath = path.join(projectPath, file)
+      const fileStat = fs.statSync(filePath)
+      let sessionInfo = { name: file.replace('.jsonl', ''), path: filePath }
+      try {
+        const content = fs.readFileSync(filePath, 'utf-8')
+        const items = parseJsonl(content)
+        let sessionId = '', cwd = ''
+        for (const data of items.slice(0, 20)) {
+          if (!sessionId && data.sessionId) sessionId = data.sessionId
+          if (!cwd && data.cwd) cwd = data.cwd
+          if (sessionId && cwd) break
+        }
+        let timestamp = ''
+        for (let k = items.length - 1; k >= 0; k--) {
+          if (items[k].timestamp) { timestamp = items[k].timestamp; break }
+        }
+        const isFavorite = items.some(item => item.type === 'custom-favorite')
+        sessionInfo = {
+          name: extractSessionName(items, file.replace('.jsonl', '')),
+          path: filePath,
+          sessionId,
+          timestamp,
+          cwd,
+          isFavorite
+        }
+      } catch (e) {}
+      // 扫描同名目录下的 subagents
+      const sessionUuid = file.replace('.jsonl', '')
+      const subagentDir = path.join(projectPath, sessionUuid, 'subagents')
+      const subagents = []
+      if (fs.existsSync(subagentDir)) {
+        try {
+          const subFiles = fs.readdirSync(subagentDir).filter(f => /^agent-[a-f0-9]+\.jsonl$/.test(f))
+          for (const subFile of subFiles) {
+            const agentId = subFile.replace(/^agent-/, '').replace(/\.jsonl$/, '')
+            const subPath = path.join(subagentDir, subFile)
+            const subStat = fs.statSync(subPath)
+            let subName = agentId
+            const metaPath = path.join(subagentDir, `agent-${agentId}.meta.json`)
+            if (fs.existsSync(metaPath)) {
+              try {
+                const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
+                if (meta.description) subName = meta.description
+              } catch (e) {}
+            }
+            subagents.push({
+              agentId,
+              name: subName,
+              path: subPath,
+              size: subStat.size,
+              modifiedTime: subStat.mtime,
+              isSubagent: true,
+              parentSessionPath: filePath
+            })
+          }
+        } catch (e) {}
+      }
+      return { ...sessionInfo, size: fileStat.size, modifiedTime: fileStat.mtime, subagents }
+    }).sort((a, b) => new Date(b.modifiedTime) - new Date(a.modifiedTime))
+    return { success: true, sessions }
+  } catch (error) {
+    return { success: false, error: error.message, sessions: [] }
+  }
+}
+
 function getAllProjects() {
   const projectsPath = getProjectsPath()
   try {
@@ -88,7 +210,6 @@ function getAllProjects() {
           try {
             const content = fs.readFileSync(filePath, 'utf-8')
             const items = parseJsonl(content)
-            // 遍历前面几条提取 sessionId、cwd；从最后几条取最新 timestamp
             let sessionId = '', cwd = ''
             for (const data of items.slice(0, 20)) {
               if (!sessionId && data.sessionId) sessionId = data.sessionId
@@ -112,7 +233,6 @@ function getAllProjects() {
           return { ...sessionInfo, size: fileStat.size, modifiedTime: fileStat.mtime }
         })
         .sort((a, b) => new Date(b.modifiedTime) - new Date(a.modifiedTime))
-      // 从第一个有 cwd 的 session 中提取项目实际路径
       if (sessions.length === 0) continue
       const firstCwd = sessions.find(s => s.cwd)?.cwd || ''
       projects.push({ name: projectDir, displayName: firstCwd || projectDir, path: projectPath, sessions })
@@ -232,16 +352,28 @@ function renameSession(filePath, newTitle) {
       if (data.sessionId) { sessionId = data.sessionId; break }
     }
     // 找已有的 custom-title 并更新
-    let found = false
+    let foundTitle = false
     for (let i = items.length - 1; i >= 0; i--) {
       if (items[i].type === 'custom-title') {
         items[i].customTitle = newTitle
-        found = true
+        foundTitle = true
         break
       }
     }
-    if (!found) {
+    if (!foundTitle) {
       items.push({ type: 'custom-title', customTitle: newTitle, sessionId })
+    }
+    // 同步更新 agent-name
+    let foundAgent = false
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (items[i].type === 'agent-name') {
+        items[i].agentName = newTitle
+        foundAgent = true
+        break
+      }
+    }
+    if (!foundAgent) {
+      items.push({ type: 'agent-name', agentName: newTitle, sessionId })
     }
     // 写回为标准 JSONL 格式（每行一个 JSON）
     const output = items.map(item => JSON.stringify(item)).join('\n') + '\n'
@@ -315,9 +447,33 @@ function forkSession(sourceFilePath, cutoffUuid, title) {
     for (const item of forked) {
       if (item.sessionId) item.sessionId = newSessionId
     }
-    // 添加 custom-title
+    // 添加 custom-title 和 agent-name
     forked.push({ type: 'custom-title', customTitle: title, sessionId: newSessionId })
+    forked.push({ type: 'agent-name', agentName: title, sessionId: newSessionId })
     // 写入同目录下
+    const dir = path.dirname(sourceFilePath)
+    const newFilePath = path.join(dir, newSessionId + '.jsonl')
+    const output = forked.map(item => JSON.stringify(item)).join('\n') + '\n'
+    fs.writeFileSync(newFilePath, output, 'utf-8')
+    return { success: true, sessionId: newSessionId, path: newFilePath }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+}
+
+function forkSummarySession(sourceFilePath, summaryUuid, title) {
+  try {
+    if (!fs.existsSync(sourceFilePath)) return { success: false, error: 'File not found' }
+    const content = fs.readFileSync(sourceFilePath, 'utf-8')
+    const items = parseJsonl(content)
+    const summaryItem = items.find(item => item.uuid === summaryUuid)
+    if (!summaryItem) return { success: false, error: 'Summary message not found' }
+    const newSessionId = crypto.randomUUID()
+    const forked = [
+      { ...summaryItem, sessionId: newSessionId },
+      { type: 'custom-title', customTitle: title, sessionId: newSessionId },
+      { type: 'agent-name', agentName: title, sessionId: newSessionId }
+    ]
     const dir = path.dirname(sourceFilePath)
     const newFilePath = path.join(dir, newSessionId + '.jsonl')
     const output = forked.map(item => JSON.stringify(item)).join('\n') + '\n'
@@ -355,6 +511,75 @@ function toggleFavorite(filePath) {
   }
 }
 
+// 读取快照中选定文件的备份内容与当前磁盘内容，供 diff 预览使用
+function getSnapshotFileContents(sessionFilePath, selectedBackups) {
+  try {
+    const sessionUuid = path.basename(sessionFilePath, '.jsonl')
+    const fileHistoryDir = path.join(os.homedir(), '.claude', 'file-history', sessionUuid)
+    const content = fs.readFileSync(sessionFilePath, 'utf-8')
+    const items = parseJsonl(content)
+    let cwd = ''
+    for (const item of items.slice(0, 20)) {
+      if (item.cwd) { cwd = item.cwd; break }
+    }
+    if (!cwd) return { success: false, error: '无法确定项目目录' }
+    const files = []
+    for (const [relativePath, { backupFileName }] of Object.entries(selectedBackups)) {
+      const backupFilePath = path.join(fileHistoryDir, backupFileName)
+      const normalized = relativePath.split(/[/\\]/).join(path.sep)
+      const absolutePath = path.join(cwd, normalized)
+      let backupContent = null, currentContent = null
+      try { backupContent = fs.readFileSync(backupFilePath, 'utf-8') } catch (e) {}
+      try { currentContent = fs.readFileSync(absolutePath, 'utf-8') } catch (e) {}
+      files.push({ filePath: relativePath, backupContent, currentContent })
+    }
+    return { success: true, files }
+  } catch (e) {
+    return { success: false, error: e.message }
+  }
+}
+
+// 恢复会话文件到指定快照时的状态
+function restoreSnapshot(sessionFilePath, trackedFileBackups) {
+  try {
+    const sessionUuid = path.basename(sessionFilePath, '.jsonl')
+    const fileHistoryDir = path.join(os.homedir(), '.claude', 'file-history', sessionUuid)
+
+    // 从会话文件中读取 cwd（项目根目录）
+    const content = fs.readFileSync(sessionFilePath, 'utf-8')
+    const items = parseJsonl(content)
+    let cwd = ''
+    for (const item of items.slice(0, 20)) {
+      if (item.cwd) { cwd = item.cwd; break }
+    }
+    if (!cwd) return { success: false, error: '无法确定项目目录（cwd 未找到）', restoredFiles: [], errors: [] }
+
+    const restoredFiles = []
+    const errors = []
+
+    for (const [relativePath, { backupFileName }] of Object.entries(trackedFileBackups)) {
+      try {
+        const backupFilePath = path.join(fileHistoryDir, backupFileName)
+        if (!fs.existsSync(backupFilePath)) {
+          errors.push(`备份文件不存在: ${relativePath}`)
+          continue
+        }
+        const backupContent = fs.readFileSync(backupFilePath, 'utf-8')
+        const normalized = relativePath.split(/[/\\]/).join(path.sep)
+        const absolutePath = path.join(cwd, normalized)
+        fs.writeFileSync(absolutePath, backupContent, 'utf-8')
+        restoredFiles.push(relativePath)
+      } catch (e) {
+        errors.push(`${relativePath}: ${e.message}`)
+      }
+    }
+
+    return { success: errors.length === 0, restoredFiles, errors, cwd }
+  } catch (error) {
+    return { success: false, error: error.message, restoredFiles: [], errors: [] }
+  }
+}
+
 function batchDeleteSessions(filePaths) {
   let deleted = 0, errors = []
   for (const fp of filePaths) {
@@ -375,6 +600,8 @@ function batchDeleteSessions(filePaths) {
 
 window.services = {
   getProjectsPath,
+  getProjectsQuick,
+  loadProjectSessions,
   getAllProjects,
   readSessionFile,
   deleteSession,
@@ -385,6 +612,9 @@ window.services = {
   saveText,
   resumeSession,
   forkSession,
+  forkSummarySession,
   toggleFavorite,
-  batchDeleteSessions
+  batchDeleteSessions,
+  restoreSnapshot,
+  getSnapshotFileContents
 }

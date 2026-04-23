@@ -2,7 +2,8 @@
 import { ref, watch, nextTick } from 'vue'
 
 const props = defineProps({
-  show: Boolean
+  show: Boolean,
+  desc: { type: String, default: '从当前 AI 消息处截断，创建新的会话分支' }
 })
 
 const emit = defineEmits(['confirm', 'cancel'])
@@ -29,7 +30,7 @@ function confirm() {
     <div v-if="show" class="dialog-overlay" @click.self="emit('cancel')">
       <div class="dialog-card">
         <h3 class="dialog-title">Fork 会话</h3>
-        <p class="dialog-desc">从当前 AI 消息处截断，创建新的会话分支</p>
+        <p class="dialog-desc">{{ desc }}</p>
         <input
           class="fork-name-input"
           v-model="name"

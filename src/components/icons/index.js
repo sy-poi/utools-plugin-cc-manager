@@ -193,6 +193,21 @@ export const IconAutoTheme = (props) => icon(
   { size: 16, ...props }
 )
 
+// Subagent (play_circle — represents a running agent task)
+export const IconSubagent = (props) => {
+  const { size = 14, ...attrs } = props || {}
+  return h('svg', { viewBox: '0 0 24 24', width: size, height: size, fill: 'currentColor', ...attrs }, [
+    h('path', { d: 'M10 16.5l6-4.5-6-4.5v9z' }),
+    h('path', { d: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8z' })
+  ])
+}
+
+// Restore / History (clock with undo arrow)
+export const IconRestore = (props) => icon(
+  'M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.25 2.52.77-1.28-3.52-2.09V8H12z',
+  { size: 14, ...props }
+)
+
 // More (vertical dots)
 export const IconMore = (props) => icon(
   'M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z',
