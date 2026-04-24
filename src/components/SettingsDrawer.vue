@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 import { IconClose } from './icons'
 import { useSnackbar } from '../composables/useSnackbar'
 import { useTheme } from '../composables/useTheme'
@@ -12,6 +12,44 @@ const props = defineProps({
 
 const emit = defineEmits(['update:terminalCommand', 'update:terminalApp', 'close'])
 const { showSnackbar } = useSnackbar()
+const platform = window.utools.isWindows() ? 'win32' : window.utools.isMacOS() ? 'darwin' : 'linux'
+
+const platformExamples = {
+  win32: {
+    label: 'Windows',
+    items: [
+      'start cmd /c "cd ${cwd} && ${cc_cmd}"',
+      'wt -d "${cwd}" -- ${cc_cmd}',
+      'wt -p "[终端配置名称]" -d "${cwd}" -- ${cc_cmd}',
+      'wezterm start cmd /c "cd /d ${cwd} && ${cc_cmd}"',
+      'start powershell -Command "cd \'${cwd}\'; ${cc_cmd}"',
+      'wt -d "${cwd}" -- pwsh -Command ${cc_cmd}',
+      '"C:\\Program Files\\Git\\git-bash.exe" --cd="${cwd}" -c "${cc_cmd}"',
+    ]
+  },
+  darwin: {
+    label: 'macOS',
+    items: [
+      "osascript -e 'tell app \"Terminal\" to do script \"cd ${cwd} && ${cc_cmd}\"'",
+      "osascript -e 'tell app \"iTerm2\" to create window with default profile command \"cd ${cwd} && ${cc_cmd}\"'",
+    ]
+  },
+  linux: {
+    label: 'Linux',
+    items: [
+      'gnome-terminal -- bash -c "cd ${cwd} && ${cc_cmd}"',
+      'konsole -e bash -c "cd ${cwd} && ${cc_cmd}"',
+      'alacritty --working-directory "${cwd}" -e bash -c "${cc_cmd}"',
+      'kitty --directory "${cwd}" bash -c "${cc_cmd}"',
+    ]
+  }
+}
+
+const defaultExample = platformExamples[platform].items[0]
+const orderedGroups = computed(() =>
+  [platform, ...['win32', 'darwin', 'linux'].filter(k => k !== platform)]
+    .map(k => platformExamples[k])
+)
 const { themeMode, setThemeMode } = useTheme()
 const draft = ref('')
 const terminalAppMode = ref('auto')
@@ -118,14 +156,23 @@ function save() {
                 class="setting-input"
                 :class="{ error: terminalAppError }"
                 v-model="draftTerminalApp"
-                placeholder='cmd /k "cd ${cwd} && ${cc_cmd}"'
+                placeholder='start cmd /c "cd ${cwd} && ${cc_cmd}"'
                 @keyup.enter="save"
                 @input="terminalAppError = false"
               />
               <div v-if="terminalAppError" class="input-error">请填写终端程序</div>
               <div class="setting-desc" style="margin-top: 4px; margin-bottom: 0;">
                 占位符：<code>${cwd}</code> 项目目录、<code>${cc_cmd}</code> 恢复命令<br>
-                例：<code>cmd /k "cd ${cwd} && ${cc_cmd}"</code>
+                <code>{{ defaultExample }}</code>
+                <details class="more-examples">
+                  <summary>更多示例</summary>
+                  <div class="examples-list">
+                    <template v-for="group in orderedGroups" :key="group.label">
+                      <div class="example-group">{{ group.label }}</div>
+                      <code v-for="item in group.items" :key="item">{{ item }}</code>
+                    </template>
+                  </div>
+                </details>
               </div>
             </template>
           </div>
@@ -278,6 +325,34 @@ function save() {
   border-color: #90caf9;
   background: rgba(144, 202, 249, 0.12);
   color: #90caf9;
+}
+.more-examples { margin-top: 6px; }
+.more-examples summary {
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.7;
+  font-size: 11px;
+}
+.more-examples summary:hover { opacity: 1; }
+.examples-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 5px;
+}
+.example-group {
+  font-size: 10px;
+  opacity: 0.5;
+  margin-top: 4px;
+  counter-reset: ex;
+}
+.examples-list code {
+  display: block;
+  counter-increment: ex;
+}
+.examples-list code::before {
+  content: counter(ex) ". ";
+  opacity: 0.5;
 }
 .setting-input.error { border-color: #e53935; }
 :global(.dark .setting-input.error) { border-color: #ef5350; }

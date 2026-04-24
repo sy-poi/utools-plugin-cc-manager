@@ -403,7 +403,7 @@ function spawnDetached(cmd, opts = {}) {
     // Windows 下显式传 /u 让 cmd.exe 以 UTF-16LE 输出错误信息，避免 GBK 乱码
     const isWin = process.platform === 'win32'
     const proc = isWin
-      ? spawn('cmd', ['/u', '/d', '/s', '/c', `"${cmd}"`], { stdio: ['ignore', 'ignore', 'pipe'], windowsVerbatimArguments: true, ...opts })
+      ? spawn('cmd', ['/u', '/d', '/s', '/c', `"${cmd}"`], { stdio: ['ignore', 'ignore', 'pipe'], windowsVerbatimArguments: true, windowsHide: true, ...opts })
       : spawn(cmd, [], { shell: true, stdio: ['ignore', 'ignore', 'pipe'], ...opts })
     proc.unref()
 
@@ -449,7 +449,7 @@ function resumeSession(sessionId, cwd, command, terminalApp) {
   }
 
   if (platform === 'win32') {
-    return spawnDetached(`start cmd /k "${cmd}"`, { cwd: workDir })
+    return spawnDetached(`start cmd /c "${cmd}"`, { cwd: workDir })
   } else if (platform === 'darwin') {
     const escaped = cmd.replace(/"/g, '\\"')
     const escapedDir = workDir.replace(/"/g, '\\"')
