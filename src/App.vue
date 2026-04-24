@@ -312,6 +312,17 @@ async function resumeForkedSession() {
   }
 }
 
+// New session in terminal
+async function newSessionForProject(project) {
+  const cwd = project.cwd || project.sessions?.[0]?.cwd || ''
+  try {
+    await window.services.newSession(cwd, terminalCommand.value, terminalApp.value)
+    showSnackbar('已在终端中打开')
+  } catch (e) {
+    showSnackbar('打开终端失败：' + (e.message || e), 'error')
+  }
+}
+
 // Resume
 async function resumeSession(session) {
   const s = session || selectedSession.value
@@ -434,6 +445,7 @@ onMounted(() => {
       @delete-session="handleDelete"
       @batch-delete="handleBatchDelete"
       @open-project-dir="openProjectDir"
+      @new-session="newSessionForProject"
       @refresh="refresh"
       @open-settings="showSettings = true"
       @open-session-window="openSessionWindow"

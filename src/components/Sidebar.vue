@@ -22,6 +22,7 @@ const emit = defineEmits([
   'rename-session',
   'delete-session',
   'open-project-dir',
+  'new-session',
   'refresh',
   'open-settings',
   'batch-delete',
@@ -90,21 +91,34 @@ function toggleFavorite(session, event) {
 
 // Session item dropdown menu
 const sidebarMenu = ref({ session: null, style: {} })
+// Project item dropdown menu
+const projectMenu = ref({ project: null, style: {} })
 
 function openMenu(session, event) {
   event.stopPropagation()
+  projectMenu.value.project = null
   if (event.type === 'contextmenu') {
-    // 右键：菜单左边缘对齐鼠标，向右展开
     sidebarMenu.value = { session, style: { left: event.clientX + 'px', top: event.clientY + 'px' } }
   } else {
-    // 按钮点击：菜单右边缘对齐按钮右侧
     const rect = event.currentTarget.getBoundingClientRect()
     sidebarMenu.value = { session, style: { right: (window.innerWidth - rect.right) + 'px', top: (rect.bottom + 4) + 'px' } }
   }
 }
 
+function openProjectMenu(project, event) {
+  event.stopPropagation()
+  sidebarMenu.value.session = null
+  if (event.type === 'contextmenu') {
+    projectMenu.value = { project, style: { left: event.clientX + 'px', top: event.clientY + 'px' } }
+  } else {
+    const rect = event.currentTarget.getBoundingClientRect()
+    projectMenu.value = { project, style: { right: (window.innerWidth - rect.right) + 'px', top: (rect.bottom + 4) + 'px' } }
+  }
+}
+
 function closeMenu() {
   sidebarMenu.value.session = null
+  projectMenu.value.project = null
 }
 
 function menuOpenWindow() {
@@ -131,6 +145,16 @@ function menuRename() {
 function menuDelete(event) {
   const s = sidebarMenu.value.session; closeMenu()
   emit('delete-session', s, event)
+}
+
+function menuProjectNewSession() {
+  const p = projectMenu.value.project; closeMenu()
+  emit('new-session', p)
+}
+
+function menuProjectOpenDir() {
+  const p = projectMenu.value.project; closeMenu()
+  emit('open-project-dir', p)
 }
 
 const ctrlHeld = ref(false)
@@ -220,13 +244,13 @@ const filteredProjects = computed(() => {
     <div class="sidebar-list">
       <template v-if="filteredProjects.length > 0">
         <div v-for="project in filteredProjects" :key="project.name" class="project-group">
-          <div class="project-item" @click="emit('toggle-project', project.name)">
+          <div class="project-item" @click="emit('toggle-project', project.name)" @contextmenu.prevent="openProjectMenu(project, $event)">
             <span class="expand-icon">{{ expandedProjects[project.name] ? '▾' : '▸' }}</span>
             <IconFolder class="folder-icon" />
             <span class="project-name" :title="project.displayName">{{ shortenPath(project.displayName) }}</span>
             <span class="session-count">{{ project.sessionsLoaded ? project.sessions.length : project.sessionCount }}</span>
-            <button v-if="project.cwd || project.sessions[0]?.cwd" class="project-open-btn" @click.stop="emit('open-project-dir', project)" title="打开目录">
-              <IconOpenExternal />
+            <button class="project-more-btn" @click.stop="openProjectMenu(project, $event)" title="更多操作">
+              <IconMore />
             </button>
           </div>
           <div v-if="expandedProjects[project.name] || searchQuery?.trim()" class="session-list">
@@ -338,6 +362,25 @@ const filteredProjects = computed(() => {
       <button class="menu-danger" :class="{ 'menu-danger-direct': ctrlHeld }" @click="menuDelete($event)">
         <IconDelete :size="13" />
         <span>{{ ctrlHeld ? '直接删除' : '删除' }}</span>
+      </button>
+    </div>
+  </Transition>
+
+  <!-- 项目右键菜单 -->
+  <Transition name="menu-fade">
+    <div
+      v-if="projectMenu.project"
+      class="sidebar-item-menu"
+      :style="projectMenu.style"
+      @click.stop
+    >
+      <button @click="menuProjectNewSession">
+        <IconTerminal :size="13" />
+        <span>新建会话</span>
+      </button>
+      <button v-if="projectMenu.project?.cwd || projectMenu.project?.sessions?.[0]?.cwd" @click="menuProjectOpenDir">
+        <IconOpenExternal :size="13" />
+        <span>打开目录</span>
       </button>
     </div>
   </Transition>
@@ -547,7 +590,7 @@ const filteredProjects = computed(() => {
 :global(.dark .session-count) {
   background: rgba(255,255,255,0.12);
 }
-.project-open-btn {
+.project-more-btn {
   display: none;
   align-items: center;
   justify-content: center;
@@ -558,21 +601,21 @@ const filteredProjects = computed(() => {
   border-radius: 4px;
   cursor: pointer;
   color: inherit;
-  opacity: 0.4;
+  opacity: 0.5;
   flex-shrink: 0;
 }
-.project-item:hover .project-open-btn {
+.project-item:hover .project-more-btn {
   display: flex;
 }
 .project-item:hover .session-count {
   display: none;
 }
-.project-open-btn:hover {
+.project-more-btn:hover {
   opacity: 1;
-  background: rgba(0,0,0,0.06);
+  background: rgba(0,0,0,0.08);
 }
-:global(.dark .project-open-btn:hover) {
-  background: rgba(255,255,255,0.08);
+:global(.dark .project-more-btn:hover) {
+  background: rgba(255,255,255,0.1);
 }
 
 .session-list {

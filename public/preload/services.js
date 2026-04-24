@@ -433,6 +433,42 @@ function spawnDetached(cmd, opts = {}) {
   })
 }
 
+// 在新终端窗口中新建会话，返回 Promise
+function newSession(cwd, command, terminalApp) {
+  const cmd = command || 'claude'
+  const workDir = cwd && fs.existsSync(cwd) ? cwd : os.homedir()
+  const platform = process.platform
+  const app = (terminalApp || 'auto').trim()
+  const isAuto = app === '' || app.toLowerCase() === 'auto'
+
+  if (!isAuto) {
+    const finalCmd = app
+      .replace(/\$\{cc_cmd\}/g, cmd)
+      .replace(/\$\{cwd_raw\}/g, workDir)
+      .replace(/\$\{cwd\}/g, workDir.replace(/\\/g, '/'))
+    return spawnDetached(finalCmd, { cwd: workDir })
+  }
+
+  if (platform === 'win32') {
+    return spawnDetached(`start cmd /c "${cmd}"`, { cwd: workDir })
+  } else if (platform === 'darwin') {
+    const escaped = cmd.replace(/"/g, '\\"')
+    const escapedDir = workDir.replace(/"/g, '\\"')
+    return spawnDetached(`osascript -e 'tell app "Terminal" to do script "cd ${escapedDir} && ${escaped}"'`)
+  } else {
+    const terminals = ['x-terminal-emulator', 'gnome-terminal', 'konsole', 'xfce4-terminal', 'xterm']
+    const tryNext = (i) => {
+      if (i >= terminals.length) return Promise.reject(new Error('未找到可用终端'))
+      const term = terminals[i]
+      const termCmd = term === 'gnome-terminal'
+        ? `${term} -- bash -c 'cd "${workDir}" && ${cmd}; exec bash'`
+        : `${term} -e 'bash -c "cd \\"${workDir}\\" && ${cmd}; exec bash"'`
+      return spawnDetached(termCmd).catch(() => tryNext(i + 1))
+    }
+    return tryNext(0)
+  }
+}
+
 // 在新终端窗口中恢复会话，返回 Promise
 function resumeSession(sessionId, cwd, command, terminalApp) {
   const cmd = `${command || 'claude'} --resume ${sessionId}`
@@ -444,7 +480,8 @@ function resumeSession(sessionId, cwd, command, terminalApp) {
   if (!isAuto) {
     const finalCmd = app
       .replace(/\$\{cc_cmd\}/g, cmd)
-      .replace(/\$\{cwd\}/g, workDir)
+      .replace(/\$\{cwd_raw\}/g, workDir)
+      .replace(/\$\{cwd\}/g, workDir.replace(/\\/g, '/'))
     return spawnDetached(finalCmd, { cwd: workDir })
   }
 
@@ -654,6 +691,7 @@ window.services = {
   unwatchSessionFile,
   saveImage,
   saveText,
+  newSession,
   resumeSession,
   forkSession,
   forkSummarySession,

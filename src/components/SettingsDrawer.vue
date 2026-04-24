@@ -162,7 +162,7 @@ function save() {
               />
               <div v-if="terminalAppError" class="input-error">请填写终端程序</div>
               <div class="setting-desc" style="margin-top: 4px; margin-bottom: 0;">
-                占位符：<code>${cwd}</code> 项目目录、<code>${cc_cmd}</code> 恢复命令<br>
+                占位符：<code>${cwd}</code> 项目目录（正斜杠）、<code>${cwd_raw}</code> 原始路径、<code>${cc_cmd}</code> 恢复命令<br>
                 <code>{{ defaultExample }}</code>
                 <details class="more-examples">
                   <summary>更多示例</summary>
