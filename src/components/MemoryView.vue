@@ -19,6 +19,12 @@ const saving = reactive({})
 const editing = reactive({})
 const textareaRefs = {}
 const deleteConfirm = ref(null)
+
+function autoResize(el) {
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = el.scrollHeight + 'px'
+}
 const clearConfirm = ref(false)
 
 watch(() => props.files, (files) => {
@@ -30,6 +36,9 @@ watch(() => props.files, (files) => {
   for (const key of Object.keys(edits)) {
     if (!paths.has(key)) delete edits[key]
   }
+  nextTick(() => {
+    for (const el of Object.values(textareaRefs)) autoResize(el)
+  })
 }, { immediate: true })
 
 function isDirty(file) {
@@ -220,12 +229,13 @@ onUnmounted(() => {
           </div>
         </div>
         <textarea
-          :ref="el => { if (el) textareaRefs[file.path] = el; else delete textareaRefs[file.path] }"
+          :ref="el => { if (el) { textareaRefs[file.path] = el; autoResize(el) } else delete textareaRefs[file.path] }"
           class="file-editor"
           :class="{ readonly: !editing[file.path] }"
           v-model="edits[file.path]"
           :disabled="!editing[file.path]"
           spellcheck="false"
+          @input="autoResize($event.target)"
         ></textarea>
       </div>
     </div>
@@ -372,7 +382,7 @@ onUnmounted(() => {
 }
 .memory-empty { padding: 40px; text-align: center; opacity: 0.4; }
 
-.memory-file-card { border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }
+.memory-file-card { border: 1px solid #e0e0e0; border-radius: 8px; }
 :global(.dark .memory-file-card) { border-color: #333; }
 
 .file-card-header {
@@ -380,6 +390,7 @@ onUnmounted(() => {
   padding: 8px 12px;
   background: rgba(0,0,0,0.03);
   border-bottom: 1px solid #e0e0e0;
+  border-radius: 8px 8px 0 0;
 }
 :global(.dark .file-card-header) { background: rgba(255,255,255,0.04); border-bottom-color: #333; }
 
@@ -425,12 +436,13 @@ onUnmounted(() => {
 :global(.dark .file-delete-btn:hover) { color: #ef9a9a; background: rgba(239,154,154,0.1); }
 
 .file-editor {
-  width: 100%; min-height: 120px; padding: 12px;
+  width: 100%; min-height: 80px; padding: 12px;
   border: none; outline: none;
   font-size: 13px; font-family: 'Consolas', 'Monaco', monospace; line-height: 1.6;
   resize: vertical; background: transparent; color: inherit;
   box-sizing: border-box; display: block;
   transition: background 0.15s;
+  overflow: hidden;
 }
 .file-editor.readonly {
   resize: none; cursor: default;
