@@ -6,6 +6,7 @@ import { useDisplayMessages } from './composables/useMessageParser'
 import { IconChevronLeft, IconChevronRight } from './components/icons'
 import Sidebar from './components/Sidebar.vue'
 import SessionView from './components/SessionView.vue'
+import MemoryView from './components/MemoryView.vue'
 import RenameDialog from './components/RenameDialog.vue'
 import DeleteConfirmDialog from './components/DeleteConfirmDialog.vue'
 import ForkDialog from './components/ForkDialog.vue'
@@ -23,6 +24,9 @@ const expandedProjects = ref({})
 const selectedSession = ref(null)
 const sessionContent = ref([])
 const loading = ref(false)
+const selectedMemory = ref(null)
+const memoryFiles = ref([])
+const memoryLoading = ref(false)
 const searchQuery = ref('')
 const sidebarCollapsed = ref(false)
 const showSettings = ref(false)
@@ -93,8 +97,9 @@ function loadProjects(force = false) {
     showSnackbar('加载项目失败', 'error')
   }
   projectsLoaded.value = true
+  const skipSessionLoad = sidebarRef.value?.filterOnlyMemory?.value
   for (const p of projects.value) {
-    if (p.sessionsLoaded || expandedProjects.value[p.name]) {
+    if (!skipSessionLoad && (p.sessionsLoaded || expandedProjects.value[p.name])) {
       loadProjectSessionsFor(p.name)
     }
   }
@@ -129,9 +134,9 @@ function openProjectDir(project) {
   if (cwd) window.utools.shellOpenPath(cwd)
 }
 
-function toggleProject(name) {
+function toggleProject(name, skipLoad = false) {
   expandedProjects.value[name] = !expandedProjects.value[name]
-  if (expandedProjects.value[name]) {
+  if (expandedProjects.value[name] && !skipLoad) {
     const project = projects.value.find(p => p.name === name)
     if (project && !project.sessionsLoaded && !project.sessionsLoading) {
       loadProjectSessionsFor(name)
@@ -173,7 +178,34 @@ function loadSessionContent(path, autoScroll = false) {
   }
 }
 
+function selectMemory(project) {
+  selectedMemory.value = project
+  selectedSession.value = null
+  sessionContent.value = []
+  memoryLoading.value = true
+  const result = window.services.getMemoryFiles(project.path)
+  memoryLoading.value = false
+  memoryFiles.value = result.success ? result.files : []
+}
+
+function reloadMemoryFiles() {
+  if (!selectedMemory.value) return
+  const result = window.services.getMemoryFiles(selectedMemory.value.path)
+  memoryFiles.value = result.success ? result.files : []
+}
+
+function onMemoryCleared() {
+  const name = selectedMemory.value?.name
+  selectedMemory.value = null
+  memoryFiles.value = []
+  // 更新项目列表中的 hasMemory 状态
+  const p = projects.value.find(p => p.name === name)
+  if (p) p.hasMemory = false
+}
+
 function selectSession(session) {
+  selectedMemory.value = null
+  memoryFiles.value = []
   selectedSession.value = session
   if (session.isSubagent) {
     sidebarRef.value?.expandSubagents(session.parentSessionPath)
@@ -434,6 +466,7 @@ onMounted(() => {
       :projects="projects"
       :expanded-projects="expandedProjects"
       :selected-session="selectedSession"
+      :selected-memory="selectedMemory"
       :search-query="searchQuery"
       :collapsed="sidebarCollapsed"
       :projects-loaded="projectsLoaded"
@@ -446,6 +479,7 @@ onMounted(() => {
       @batch-delete="handleBatchDelete"
       @open-project-dir="openProjectDir"
       @new-session="newSessionForProject"
+      @select-memory="selectMemory"
       @refresh="refresh"
       @open-settings="showSettings = true"
       @open-session-window="openSessionWindow"
@@ -460,7 +494,16 @@ onMounted(() => {
 
     <!-- 右侧内容区 -->
     <main class="content">
+      <MemoryView
+        v-if="selectedMemory"
+        :project="selectedMemory"
+        :files="memoryFiles"
+        :loading="memoryLoading"
+        @reload="reloadMemoryFiles"
+        @cleared="onMemoryCleared"
+      />
       <SessionView
+        v-else
         ref="sessionViewRef"
         :session="selectedSession"
         :display-messages="displayMessages"

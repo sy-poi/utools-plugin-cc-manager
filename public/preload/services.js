@@ -80,7 +80,9 @@ function getProjectsQuick() {
       const stat = fs.statSync(projectPath)
       if (!stat.isDirectory()) continue
       const jsonlFiles = fs.readdirSync(projectPath).filter(f => f.endsWith('.jsonl'))
-      if (jsonlFiles.length === 0) continue
+      const projectMemoryDir = path.join(projectPath, 'memory')
+      const projectHasMemory = fs.existsSync(path.join(projectMemoryDir, 'MEMORY.md'))
+      if (jsonlFiles.length === 0 && !projectHasMemory) continue
       // stat 所有文件找最新修改时间和最近修改的文件
       let latestMtime = new Date(0)
       let newestFile = null
@@ -89,6 +91,10 @@ function getProjectsQuick() {
         const m = fs.statSync(path.join(projectPath, file)).mtime
         if (m > latestMtime) latestMtime = m
         if (m > newestMtime) { newestMtime = m; newestFile = file }
+      }
+      // 无会话时用 memory 目录的时间兜底
+      if (latestMtime.getTime() === 0 && projectHasMemory) {
+        try { latestMtime = fs.statSync(projectMemoryDir).mtime } catch (e) {}
       }
       // 只读最新文件的前几条取 cwd
       let cwd = ''
@@ -101,6 +107,19 @@ function getProjectsQuick() {
           }
         } catch (e) {}
       }
+      const memoryDir = projectMemoryDir
+      const hasMemory = projectHasMemory
+      let memorySize = 0
+      let memoryFileCount = 0
+      if (hasMemory) {
+        try {
+          const memFiles = fs.readdirSync(memoryDir)
+          for (const mf of memFiles) {
+            const s = fs.statSync(path.join(memoryDir, mf))
+            if (s.isFile()) { memorySize += s.size; memoryFileCount++ }
+          }
+        } catch (e) {}
+      }
       projects.push({
         name: projectDir,
         displayName: cwd || projectDir,
@@ -110,7 +129,10 @@ function getProjectsQuick() {
         sessions: [],
         sessionsLoaded: false,
         sessionsLoading: false,
-        latestMtime
+        latestMtime,
+        hasMemory,
+        memorySize,
+        memoryFileCount
       })
     }
     return projects.sort((a, b) => b.latestMtime - a.latestMtime)
@@ -298,6 +320,22 @@ function readSessionFile(filePath) {
 }
 
 let currentWatcher = null
+let currentMemoryWatcher = null
+
+function watchMemoryDir(projectPath, callback) {
+  if (currentMemoryWatcher) { currentMemoryWatcher.close(); currentMemoryWatcher = null }
+  const memoryDir = path.join(projectPath, 'memory')
+  if (!fs.existsSync(memoryDir)) return
+  let debounceTimer = null
+  currentMemoryWatcher = fs.watch(memoryDir, () => {
+    clearTimeout(debounceTimer)
+    debounceTimer = setTimeout(() => { if (callback) callback() }, 300)
+  })
+}
+
+function unwatchMemoryDir() {
+  if (currentMemoryWatcher) { currentMemoryWatcher.close(); currentMemoryWatcher = null }
+}
 
 function watchSessionFile(filePath, callback) {
   // 先关掉之前的 watcher
@@ -565,6 +603,68 @@ function forkSummarySession(sourceFilePath, summaryUuid, title) {
   }
 }
 
+// 记忆管理：获取 memory 目录下所有文件内容
+function getMemoryFiles(projectPath) {
+  const memoryDir = path.join(projectPath, 'memory')
+  if (!fs.existsSync(memoryDir)) return { success: false, files: [] }
+  try {
+    const entries = fs.readdirSync(memoryDir).filter(f => {
+      return fs.statSync(path.join(memoryDir, f)).isFile()
+    })
+    const files = entries.map(f => ({
+      name: f,
+      path: path.join(memoryDir, f),
+      content: fs.readFileSync(path.join(memoryDir, f), 'utf-8')
+    }))
+    files.sort((a, b) => {
+      if (a.name === 'MEMORY.md') return -1
+      if (b.name === 'MEMORY.md') return 1
+      return a.name.localeCompare(b.name)
+    })
+    return { success: true, files }
+  } catch (e) {
+    return { success: false, error: e.message, files: [] }
+  }
+}
+
+function saveMemoryFile(filePath, content) {
+  try {
+    fs.writeFileSync(filePath, content, 'utf-8')
+    return { success: true }
+  } catch (e) {
+    return { success: false, error: e.message }
+  }
+}
+
+function deleteMemoryFile(filePath) {
+  try {
+    fs.unlinkSync(filePath)
+    return { success: true }
+  } catch (e) {
+    return { success: false, error: e.message }
+  }
+}
+
+function clearMemory(projectPath) {
+  const memoryDir = path.join(projectPath, 'memory')
+  try {
+    if (!fs.existsSync(memoryDir)) return { success: true }
+    const entries = fs.readdirSync(memoryDir)
+    const errors = []
+    for (const entry of entries) {
+      try {
+        fs.rmSync(path.join(memoryDir, entry), { recursive: true, force: true })
+      } catch (e) {
+        errors.push(`${entry}: ${e.message}`)
+      }
+    }
+    if (errors.length > 0) return { success: false, error: errors.join('\n') }
+    return { success: true }
+  } catch (e) {
+    return { success: false, error: e.message }
+  }
+}
+
 function toggleFavorite(filePath) {
   try {
     if (!fs.existsSync(filePath)) return { success: false, error: 'File not found' }
@@ -698,5 +798,11 @@ window.services = {
   toggleFavorite,
   batchDeleteSessions,
   restoreSnapshot,
-  getSnapshotFileContents
+  getSnapshotFileContents,
+  getMemoryFiles,
+  saveMemoryFile,
+  deleteMemoryFile,
+  clearMemory,
+  watchMemoryDir,
+  unwatchMemoryDir
 }

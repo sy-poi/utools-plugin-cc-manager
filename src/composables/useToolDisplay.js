@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import { shortenFilePath } from './useFormat'
+import { lcs, inlineDiff } from './useDiff'
 
 export function formatToolInput(input) {
   if (!input || typeof input !== 'object') return ''
@@ -38,46 +39,6 @@ export function getToolSummary(name, input) {
   }
 }
 
-// Diff utilities
-function lcs(a, b) {
-  const m = a.length, n = b.length
-  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0))
-  for (let i = 1; i <= m; i++)
-    for (let j = 1; j <= n; j++)
-      dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1])
-  const result = []
-  let i = m, j = n
-  while (i > 0 && j > 0) {
-    if (a[i - 1] === b[j - 1]) { result.unshift({ ai: i - 1, bi: j - 1 }); i--; j-- }
-    else if (dp[i - 1][j] >= dp[i][j - 1]) i--
-    else j--
-  }
-  return result
-}
-
-function inlineDiff(oldLine, newLine) {
-  if (!oldLine && !newLine) return { oldParts: [{ text: '', hl: false }], newParts: [{ text: '', hl: false }] }
-  let pre = 0
-  while (pre < oldLine.length && pre < newLine.length && oldLine[pre] === newLine[pre]) pre++
-  let suf = 0
-  while (suf < oldLine.length - pre && suf < newLine.length - pre && oldLine[oldLine.length - 1 - suf] === newLine[newLine.length - 1 - suf]) suf++
-  const oldMid = oldLine.slice(pre, oldLine.length - suf)
-  const newMid = newLine.slice(pre, newLine.length - suf)
-  const prefix = oldLine.slice(0, pre)
-  const suffix = oldLine.slice(oldLine.length - suf)
-  return {
-    oldParts: [
-      ...(prefix ? [{ text: prefix, hl: false }] : []),
-      ...(oldMid ? [{ text: oldMid, hl: true }] : []),
-      ...(suffix ? [{ text: suffix, hl: false }] : [])
-    ],
-    newParts: [
-      ...(prefix ? [{ text: prefix, hl: false }] : []),
-      ...(newMid ? [{ text: newMid, hl: true }] : []),
-      ...(suffix ? [{ text: suffix, hl: false }] : [])
-    ]
-  }
-}
 
 export function formatDiffLines(oldStr, newStr) {
   const oldLines = (oldStr || '').split('\n')

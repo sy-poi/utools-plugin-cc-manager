@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref, onMounted, onUnmounted } from 'vue'
-import { IconSettings, IconSearch, IconClose, IconCollapseAll, IconExpandAll, IconRefresh, IconFolder, IconOpenExternal, IconFile, IconEdit, IconDelete, IconSun, IconMoon, IconStar, IconStarOutline, IconCheckbox, IconCheckboxChecked, IconSubagent, IconMore, IconTerminal, IconChat } from './icons'
+import { IconSettings, IconSearch, IconClose, IconCollapseAll, IconExpandAll, IconRefresh, IconFolder, IconOpenExternal, IconFile, IconEdit, IconDelete, IconSun, IconMoon, IconStar, IconStarOutline, IconCheckbox, IconCheckboxChecked, IconSubagent, IconMore, IconTerminal, IconChat, IconMemory, IconFilter } from './icons'
 import { useTheme } from '../composables/useTheme'
 import { useSnackbar } from '../composables/useSnackbar'
 import { formatTime, formatSize, shortenPath } from '../composables/useFormat'
@@ -9,6 +9,7 @@ const props = defineProps({
   projects: Array,
   expandedProjects: Object,
   selectedSession: Object,
+  selectedMemory: Object,
   searchQuery: String,
   collapsed: Boolean,
   projectsLoaded: Boolean
@@ -23,6 +24,7 @@ const emit = defineEmits([
   'delete-session',
   'open-project-dir',
   'new-session',
+  'select-memory',
   'refresh',
   'open-settings',
   'batch-delete',
@@ -71,7 +73,13 @@ function expandSubagents(sessionPath) {
   expandedSubagents.value = s
 }
 
-defineExpose({ clearMultiSelect, expandSubagents })
+// Filter state（提前声明，供 defineExpose 和 closeMenu 使用）
+const filterOpen = ref(false)
+const filterMenuStyle = ref({})
+const filterOnlyMemory = ref(false)
+const hasActiveFilter = computed(() => filterOnlyMemory.value)
+
+defineExpose({ clearMultiSelect, expandSubagents, filterOnlyMemory })
 
 // Subagent expand/collapse
 const expandedSubagents = ref(new Set())
@@ -107,6 +115,7 @@ function openMenu(session, event) {
 
 function openProjectMenu(project, event) {
   event.stopPropagation()
+  if (!project.cwd) return
   sidebarMenu.value.session = null
   if (event.type === 'contextmenu') {
     projectMenu.value = { project, style: { left: event.clientX + 'px', top: event.clientY + 'px' } }
@@ -119,6 +128,17 @@ function openProjectMenu(project, event) {
 function closeMenu() {
   sidebarMenu.value.session = null
   projectMenu.value.project = null
+  filterOpen.value = false
+}
+
+function toggleFilterMenu(event) {
+  event.stopPropagation()
+  if (filterOpen.value) { filterOpen.value = false; return }
+  sidebarMenu.value.session = null
+  projectMenu.value.project = null
+  const rect = event.currentTarget.getBoundingClientRect()
+  filterMenuStyle.value = { right: (window.innerWidth - rect.right) + 'px', top: (rect.bottom + 4) + 'px' }
+  filterOpen.value = true
 }
 
 function menuOpenWindow() {
@@ -179,6 +199,12 @@ const allExpanded = computed(() => {
 const filteredProjects = computed(() => {
   const q = (props.searchQuery || '').trim().toLowerCase()
   let result = props.projects
+
+  // 仅展示记忆管理：过滤掉没有记忆的项目
+  if (filterOnlyMemory.value) {
+    result = result.filter(p => p.hasMemory)
+  }
+
   if (q) {
     result = result.map(project => {
       const sessions = project.sessions.filter(s =>
@@ -187,14 +213,15 @@ const filteredProjects = computed(() => {
         (s.cwd && s.cwd.toLowerCase().includes(q))
       )
       if (project.displayName.toLowerCase().includes(q)) return project
-      if (sessions.length === 0) return null
+      if (sessions.length === 0 && !project.hasMemory) return null
       return { ...project, sessions }
     }).filter(Boolean)
   }
-  // Sort favorited sessions to top within each project
+
+  // 仅展示记忆管理模式下隐藏会话列表
   return result.map(p => ({
     ...p,
-    sessions: [...p.sessions].sort((a, b) => (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0)),
+    sessions: filterOnlyMemory.value ? [] : [...p.sessions].sort((a, b) => (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0)),
   }))
 })
 </script>
@@ -226,6 +253,10 @@ const filteredProjects = computed(() => {
         <button v-if="searchQuery" class="search-clear" @click="emit('update:searchQuery', '')">
           <IconClose :size="14" />
         </button>
+        <button class="search-filter-btn" :class="{ active: hasActiveFilter }" @click="toggleFilterMenu" title="过滤">
+          <IconFilter :size="14" />
+          <span v-if="hasActiveFilter" class="filter-dot"></span>
+        </button>
       </div>
       <button class="icon-btn-sm" @click="emit('toggle-all')" :title="allExpanded ? '全部收起' : '全部展开'">
         <IconCollapseAll v-if="allExpanded" />
@@ -244,16 +275,28 @@ const filteredProjects = computed(() => {
     <div class="sidebar-list">
       <template v-if="filteredProjects.length > 0">
         <div v-for="project in filteredProjects" :key="project.name" class="project-group">
-          <div class="project-item" @click="emit('toggle-project', project.name)" @contextmenu.prevent="openProjectMenu(project, $event)">
+          <div class="project-item" @click="emit('toggle-project', project.name, filterOnlyMemory)" @contextmenu.prevent="openProjectMenu(project, $event)">
             <span class="expand-icon">{{ expandedProjects[project.name] ? '▾' : '▸' }}</span>
             <IconFolder class="folder-icon" />
             <span class="project-name" :title="project.displayName">{{ shortenPath(project.displayName) }}</span>
-            <span class="session-count">{{ project.sessionsLoaded ? project.sessions.length : project.sessionCount }}</span>
-            <button class="project-more-btn" @click.stop="openProjectMenu(project, $event)" title="更多操作">
+            <span v-if="!filterOnlyMemory" class="session-count">{{ project.sessionsLoaded ? project.sessions.length : project.sessionCount }}</span>
+            <button v-if="project.cwd" class="project-more-btn" @click.stop="openProjectMenu(project, $event)" title="更多操作">
               <IconMore />
             </button>
           </div>
-          <div v-if="expandedProjects[project.name] || searchQuery?.trim()" class="session-list">
+          <div v-if="expandedProjects[project.name] || searchQuery?.trim() || filterOnlyMemory" class="session-list">
+            <!-- 记忆管理固定项（置顶） -->
+            <div
+              v-if="project.hasMemory"
+              class="memory-item"
+              :class="{ selected: selectedMemory?.name === project.name }"
+              @click="emit('select-memory', project)"
+            >
+              <IconMemory class="memory-item-icon" />
+              <span class="memory-item-label">记忆管理</span>
+              <span class="memory-item-meta">{{ formatSize(project.memorySize) }} · {{ project.memoryFileCount }}个文件</span>
+            </div>
+            <template v-if="!filterOnlyMemory">
             <div v-if="project.sessionsLoading && project.sessions.length === 0" class="sessions-loading">
               <div class="sidebar-spinner"></div>
             </div>
@@ -318,6 +361,7 @@ const filteredProjects = computed(() => {
               </template>
             </template>
             <div v-else class="empty-sessions">暂无会话</div>
+            </template>
           </div>
         </div>
       </template>
@@ -374,14 +418,30 @@ const filteredProjects = computed(() => {
       :style="projectMenu.style"
       @click.stop
     >
-      <button @click="menuProjectNewSession">
+      <button v-if="projectMenu.project?.cwd" @click="menuProjectNewSession">
         <IconTerminal :size="13" />
         <span>新建会话</span>
       </button>
-      <button v-if="projectMenu.project?.cwd || projectMenu.project?.sessions?.[0]?.cwd" @click="menuProjectOpenDir">
+      <button v-if="projectMenu.project?.cwd" @click="menuProjectOpenDir">
         <IconOpenExternal :size="13" />
         <span>打开目录</span>
       </button>
+    </div>
+  </Transition>
+
+  <!-- 过滤下拉菜单 -->
+  <Transition name="menu-fade">
+    <div
+      v-if="filterOpen"
+      class="filter-dropdown"
+      :style="filterMenuStyle"
+      @click.stop
+    >
+      <div class="filter-dropdown-title">过滤</div>
+      <label class="filter-option">
+        <input type="checkbox" v-model="filterOnlyMemory" />
+        <span>仅展示记忆管理</span>
+      </label>
     </div>
   </Transition>
 </template>
@@ -767,6 +827,51 @@ const filteredProjects = computed(() => {
   font-size: 13px;
   opacity: 0.5;
 }
+.memory-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 6px 22px;
+  border-radius: 8px;
+  cursor: pointer;
+  margin-bottom: 2px;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+.memory-item:hover {
+  background: rgba(0,0,0,0.04);
+}
+.memory-item.selected {
+  background: rgba(25, 118, 210, 0.1);
+}
+:global(.dark .memory-item) {
+  border-bottom-color: rgba(255,255,255,0.07);
+}
+:global(.dark .memory-item:hover) {
+  background: rgba(255,255,255,0.06);
+}
+:global(.dark .memory-item.selected) {
+  background: rgba(144, 202, 249, 0.15);
+}
+.memory-item-icon {
+  flex-shrink: 0;
+  opacity: 0.6;
+  color: #1976d2;
+}
+:global(.dark .memory-item-icon) {
+  color: #90caf9;
+}
+.memory-item-label {
+  font-size: 13px;
+  font-weight: 500;
+  flex: 1;
+  min-width: 0;
+}
+.memory-item-meta {
+  font-size: 11px;
+  opacity: 0.5;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
 .sessions-loading {
   display: flex;
   justify-content: center;
@@ -902,6 +1007,95 @@ const filteredProjects = computed(() => {
 :global(.dark .sidebar-item-menu-divider) {
   background: rgba(255,255,255,0.1);
 }
+.search-filter-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: none;
+  border-radius: 4px;
+  cursor: pointer;
+  color: inherit;
+  opacity: 0.35;
+  flex-shrink: 0;
+}
+.search-filter-btn:hover {
+  opacity: 0.7;
+  background: rgba(0,0,0,0.06);
+}
+.search-filter-btn.active {
+  opacity: 1;
+  color: #1976d2;
+}
+:global(.dark .search-filter-btn.active) {
+  color: #90caf9;
+}
+:global(.dark .search-filter-btn:hover) {
+  background: rgba(255,255,255,0.1);
+}
+.filter-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 5px;
+  height: 5px;
+  background: #1976d2;
+  border-radius: 50%;
+  pointer-events: none;
+}
+:global(.dark .filter-dot) {
+  background: #90caf9;
+}
+
+.filter-dropdown {
+  position: fixed;
+  z-index: 9999;
+  background: #fff;
+  border: 1px solid rgba(0,0,0,0.12);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  min-width: 160px;
+  padding: 6px 0 8px;
+}
+:global(.dark .filter-dropdown) {
+  background: #2a2a2a;
+  border-color: #444;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+.filter-dropdown-title {
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.4;
+  padding: 2px 14px 6px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.filter-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+.filter-option:hover {
+  background: rgba(0,0,0,0.04);
+}
+:global(.dark .filter-option:hover) {
+  background: rgba(255,255,255,0.06);
+}
+.filter-option input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  accent-color: #1976d2;
+  flex-shrink: 0;
+}
+
 .menu-fade-enter-active, .menu-fade-leave-active { transition: opacity 0.12s, transform 0.12s; }
 .menu-fade-enter-from, .menu-fade-leave-to { opacity: 0; transform: scale(0.95); }
 </style>
