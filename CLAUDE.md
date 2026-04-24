@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-uTools 插件，用于浏览和管理 Claude Code 的本地会话记录（`~/.claude/projects/` 下的 JSONL 文件）。支持搜索、删除、重命名、fork 分支、在终端中恢复会话、导出为 Markdown/HTML/长图等操作。
+uTools 插件，用于浏览和管理 Claude Code 的本地会话记录（`~/.claude/projects/` 下的 JSONL 文件）。支持搜索、删除、重命名、fork 分支、在终端中恢复会话、导出为 Markdown/HTML/长图、记忆管理等操作。
 
 ## 常用命令
 
@@ -35,20 +35,25 @@ pnpm build    # 构建到 dist/ 目录
 - `readSessionFile()` / `watchSessionFile()` — 读取和监听 JSONL 会话文件
 - `deleteSession()` / `renameSession()` / `forkSession()` — 会话 CRUD 操作；重命名/fork 时同步更新 agent-name 字段
 - `forkSummarySession(sourceFilePath, summaryUuid, title)` — 以上下文压缩摘要为起点创建新会话分支
+- `newSession(cwd, command, terminalApp)` — 在新终端窗口中以指定目录启动 claude（不带 --resume）
 - `resumeSession()` — 跨平台在新终端窗口中恢复会话
 - `toggleFavorite()` — 切换会话收藏状态
 - `parseJsonl()` — 兼容标准单行和美化多行两种 JSONL 格式
 - `getSnapshotFileContents(sessionFilePath, selectedBackups)` — 读取快照备份内容与当前磁盘内容，供 diff 预览
 - `restoreSnapshot(sessionFilePath, trackedFileBackups)` — 将文件恢复到指定快照时的状态
 - `saveText()` / `saveImage()` — 导出文件保存
+- `getMemoryFiles(projectPath)` — 读取 memory 目录下所有文件内容
+- `saveMemoryFile(filePath, content)` / `deleteMemoryFile(filePath)` / `clearMemory(projectPath)` — 记忆文件 CRUD
+- `watchMemoryDir(projectPath, callback)` / `unwatchMemoryDir()` — 监听 memory 目录变化
 
 ### 渲染层（Vue）
 
 `src/App.vue` 作为根组件协调全局状态和业务逻辑，UI 拆分为组件：
 
 **组件** (`src/components/`)：
-- `Sidebar.vue` — 左侧项目/会话列表、搜索、多选
+- `Sidebar.vue` — 左侧项目/会话列表、搜索、多选、过滤（仅展示有记忆的项目）
 - `SessionView.vue` — 右侧会话消息渲染（消息合并、tool_use/tool_result 配对折叠、导出）
+- `MemoryView.vue` — 记忆管理页：文件 Markdown 预览、在线编辑、外部变更冲突解决、MEMORY.md 页内链接导航
 - `ExportOptionsDialog.vue` — 导出选项对话框（图片/HTML 导出设置）
 - `RenameDialog.vue` / `DeleteConfirmDialog.vue` / `ForkDialog.vue` — 操作弹窗
 - `SettingsDrawer.vue` — 右侧抽屉设置面板
@@ -59,6 +64,7 @@ pnpm build    # 构建到 dist/ 目录
 **Composables** (`src/composables/`)：
 - `useMessageParser.js` — 消息解析核心：content blocks 解析、tool_use/tool_result 配对合并、连续 assistant 消息合并、isMeta 命令注入合并、sourceToolUseID/sourceToolAssistantUUID 工具响应合并、isApiErrorMessage 错误识别、token 统计累加
 - `useToolDisplay.js` — 工具调用展示：摘要生成、Edit diff 渲染（LCS + 内联高亮）、折叠状态管理（含 `forceExpand` 用于导出时临时展开）
+- `useDiff.js` — LCS diff 算法与内联高亮工具函数（由 useToolDisplay 和 MemoryView 共用）
 - `useSearch.js` — 会话内搜索：关键词高亮定位、区分大小写/全字匹配/正则表达式选项
 - `useExport.js` — 导出功能：Markdown 导出、`collectPageStyles()` 收集页面 CSS、`serializeToHtml()` 将 DOM 克隆序列化为独立 HTML
 - `useSnackbar.js` — 全局 snackbar 状态（模块级单例 ref）
@@ -91,7 +97,11 @@ pnpm build    # 构建到 dist/ 目录
 - `isCompactSummary` 消息直接 push 为独立节点，不参与合并，在 SessionView 中以"上下文压缩"块展示
 - 系统注入判定：`isSystemText(text)` 函数判断文本是否为系统生成内容（以 `[` 或 `<` 开头）。该函数在 `preload/services.js` 和 `src/composables/useMessageParser.js` 中各有一份，修改时必须同步更新两处。注意：含 `<command-name>` 的消息是用户命令，不算系统事件
 - 工具调用渲染：tool_use 与 tool_result 按 ID 配对，默认折叠，点击展开；若工具调用对应子对话，卡片头部显示"查看"链接（通过 `agentToolUseMap` computed 建立 toolUseId → subagent 映射）
-- Edit 工具的 diff 使用 LCS 算法 + 内联差异高亮，结果通过 WeakMap 缓存
+- Edit 工具的 diff 使用 LCS 算法 + 内联差异高亮，结果通过 WeakMap 缓存；LCS 逻辑已提取到 `useDiff.js`，MemoryView 冲突 diff 复用同一实现
+- 记忆管理：`getProjectsQuick()` 扫描项目时同时检测 `memory/MEMORY.md`，写入 `hasMemory`/`memorySize`/`memoryFileCount` 到项目对象；`App.vue` 通过 `watch(memoryFiles, ..., { deep: true })` 在记忆内容变化时实时同步侧边栏统计
+- MEMORY.md 渲染：`renderMemoryContent(text, isIndex)` 检测 YAML frontmatter 单独渲染为样式化 key-value 块；`isIndex=true` 时为含相对链接的列表项注入管理按钮（内联 SVG），点击后弹出下拉菜单可删除记忆（同步从 MEMORY.md 移除引用行并删除文件）
+- `referencedFiles` computed 实时解析 MEMORY.md 引用的文件名集合，未被引用的 `.md` 文件标记为"无效记忆"并显示删除按钮
+- 共用滚动按钮：`.scroll-btn` 样式提取到 `main.css`，SessionView 和 MemoryView 共用同一 class
 - 导出架构：图片和 HTML 导出共用 DOM 克隆方案（`prepareExportClone()` + `serializeToHtml()`），不维护独立的 HTML 模板和样式。`collectPageStyles()` 收集页面 CSS 时会过滤无关规则（sidebar/dialog 等）并剥除 `data-v-xxx` scoped 选择器，末尾追加覆盖规则确保独立 HTML 正常居中滚动
 - `DeleteConfirmDialog` 的 `showHint` prop 控制是否显示 Ctrl 跳过提示：Sidebar 调用时传 event（showHint=true），SessionView 调用时不传 event（showHint=false）
 - 项目懒加载：`loadProjects()` 调用 `getProjectsQuick()` 仅加载项目元数据；`loadProjectSessionsFor(name)` 在展开项目或搜索时按需加载完整会话列表
