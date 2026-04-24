@@ -6,21 +6,47 @@ import { useTheme } from '../composables/useTheme'
 
 const props = defineProps({
   show: Boolean,
-  terminalCommand: String
+  terminalCommand: String,
+  terminalApp: String
 })
 
-const emit = defineEmits(['update:terminalCommand', 'close'])
+const emit = defineEmits(['update:terminalCommand', 'update:terminalApp', 'close'])
 const { showSnackbar } = useSnackbar()
 const { themeMode, setThemeMode } = useTheme()
 const draft = ref('')
+const terminalAppMode = ref('auto')
+const draftTerminalApp = ref('')
+const terminalAppError = ref(false)
 
 watch(() => props.show, (v) => {
-  if (v) draft.value = props.terminalCommand
+  if (v) {
+    draft.value = props.terminalCommand
+    const app = props.terminalApp || 'auto'
+    if (app === 'auto') {
+      terminalAppMode.value = 'auto'
+      draftTerminalApp.value = window.utools?.dbStorage?.getItem('terminalAppCustom') || ''
+    } else {
+      terminalAppMode.value = 'custom'
+      draftTerminalApp.value = app
+    }
+    terminalAppError.value = false
+  }
 })
 
 function save() {
+  if (terminalAppMode.value === 'custom' && !draftTerminalApp.value.trim()) {
+    terminalAppError.value = true
+    return
+  }
+  terminalAppError.value = false
   emit('update:terminalCommand', draft.value)
   window.utools.dbStorage.setItem('terminalCommand', draft.value)
+  const appVal = terminalAppMode.value === 'auto' ? 'auto' : draftTerminalApp.value.trim()
+  emit('update:terminalApp', appVal)
+  window.utools.dbStorage.setItem('terminalApp', appVal)
+  if (draftTerminalApp.value.trim()) {
+    window.utools.dbStorage.setItem('terminalAppCustom', draftTerminalApp.value.trim())
+  }
   emit('close')
   showSnackbar('设置已保存')
 }
@@ -72,6 +98,37 @@ function save() {
             <div class="setting-desc">用于「恢复会话」功能，默认 claude</div>
             <input class="setting-input" v-model="draft" placeholder="claude" @keyup.enter="save" />
           </div>
+          <div class="setting-item">
+            <label class="setting-label">终端程序</label>
+            <div class="setting-desc">打开会话时使用的终端</div>
+            <div class="theme-options" style="margin-bottom: 6px;">
+              <button
+                class="theme-option"
+                :class="{ active: terminalAppMode === 'auto' }"
+                @click="terminalAppMode = 'auto'; terminalAppError = false"
+              >自动识别</button>
+              <button
+                class="theme-option"
+                :class="{ active: terminalAppMode === 'custom' }"
+                @click="terminalAppMode = 'custom'"
+              >自定义</button>
+            </div>
+            <template v-if="terminalAppMode === 'custom'">
+              <input
+                class="setting-input"
+                :class="{ error: terminalAppError }"
+                v-model="draftTerminalApp"
+                placeholder='cmd /k "cd ${cwd} && ${cc_cmd}"'
+                @keyup.enter="save"
+                @input="terminalAppError = false"
+              />
+              <div v-if="terminalAppError" class="input-error">请填写终端程序</div>
+              <div class="setting-desc" style="margin-top: 4px; margin-bottom: 0;">
+                占位符：<code>${cwd}</code> 项目目录、<code>${cc_cmd}</code> 恢复命令<br>
+                例：<code>cmd /k "cd ${cwd} && ${cc_cmd}"</code>
+              </div>
+            </template>
+          </div>
         </div>
         <div class="drawer-footer">
           <button class="setting-save-btn" @click="save">保存</button>
@@ -93,7 +150,7 @@ function save() {
   right: 0;
   top: 0;
   bottom: 0;
-  width: 320px;
+  width: 420px;
   background: #fff;
   display: flex;
   flex-direction: column;
@@ -222,6 +279,14 @@ function save() {
   background: rgba(144, 202, 249, 0.12);
   color: #90caf9;
 }
+.setting-input.error { border-color: #e53935; }
+:global(.dark .setting-input.error) { border-color: #ef5350; }
+.input-error {
+  font-size: 11px;
+  color: #e53935;
+  margin-top: 3px;
+}
+:global(.dark .input-error) { color: #ef5350; }
 .setting-save-btn {
   padding: 5px 16px;
   border: none;

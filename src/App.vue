@@ -27,6 +27,7 @@ const searchQuery = ref('')
 const sidebarCollapsed = ref(false)
 const showSettings = ref(false)
 const terminalCommand = ref(window.utools.dbStorage.getItem('terminalCommand') || 'claude')
+const terminalApp = ref(window.utools.dbStorage.getItem('terminalApp') || 'auto')
 const isStandaloneWindow = ref(false)
 const sessionBroadcast = new BroadcastChannel('cc-session')
 
@@ -300,26 +301,26 @@ function confirmFork(name) {
   forkDialog.value.show = false
 }
 
-function resumeForkedSession() {
+async function resumeForkedSession() {
   const { sessionId, cwd } = forkResumeConfirm.value
+  forkResumeConfirm.value.show = false
   try {
-    window.services.resumeSession(sessionId, cwd, terminalCommand.value)
+    await window.services.resumeSession(sessionId, cwd, terminalCommand.value, terminalApp.value)
     showSnackbar('已在终端中打开')
   } catch (e) {
-    showSnackbar('打开终端失败', 'error')
+    showSnackbar('打开终端失败：' + (e.message || e), 'error')
   }
-  forkResumeConfirm.value.show = false
 }
 
 // Resume
-function resumeSession(session) {
+async function resumeSession(session) {
   const s = session || selectedSession.value
   if (!s?.sessionId) return
   try {
-    window.services.resumeSession(s.sessionId, s.cwd || '', terminalCommand.value)
+    await window.services.resumeSession(s.sessionId, s.cwd || '', terminalCommand.value, terminalApp.value)
     showSnackbar('已在终端中打开')
   } catch (e) {
-    showSnackbar('打开终端失败', 'error')
+    showSnackbar('打开终端失败：' + (e.message || e), 'error')
   }
 }
 
@@ -521,7 +522,9 @@ onMounted(() => {
     <SettingsDrawer
       :show="showSettings"
       :terminal-command="terminalCommand"
+      :terminal-app="terminalApp"
       @update:terminal-command="terminalCommand = $event"
+      @update:terminal-app="terminalApp = $event"
       @close="showSettings = false"
     />
 

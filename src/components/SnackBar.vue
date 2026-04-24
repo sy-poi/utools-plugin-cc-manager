@@ -1,12 +1,12 @@
 <script setup>
 import { useSnackbar } from '../composables/useSnackbar'
 
-const { snackbar } = useSnackbar()
+const { snackbar, pauseSnackbar, resumeSnackbar } = useSnackbar()
 </script>
 
 <template>
   <Transition name="snackbar">
-    <div v-if="snackbar.show" class="snackbar" :class="'snackbar-' + snackbar.type">
+    <div v-if="snackbar.show" class="snackbar" :class="'snackbar-' + snackbar.type" @mouseenter="pauseSnackbar" @mouseleave="resumeSnackbar">
       {{ snackbar.message }}
     </div>
   </Transition>

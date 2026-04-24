@@ -1,7 +1,7 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const os = require('node:os')
-const { exec } = require('node:child_process')
+const { spawn } = require('node:child_process')
 
 /**
  * 判断文本是否为系统注入内容（非用户手动输入）
@@ -397,31 +397,75 @@ function saveText(content, filename) {
   return filePath
 }
 
-// 在新终端窗口中恢复会话
-function resumeSession(sessionId, cwd, command) {
+// 启动独立进程，立即 resolve；若进程在 400ms 内以非零码退出则 reject（命令找不到等）
+function spawnDetached(cmd, opts = {}) {
+  return new Promise((resolve, reject) => {
+    // Windows 下显式传 /u 让 cmd.exe 以 UTF-16LE 输出错误信息，避免 GBK 乱码
+    const isWin = process.platform === 'win32'
+    const proc = isWin
+      ? spawn('cmd', ['/u', '/d', '/s', '/c', `"${cmd}"`], { stdio: ['ignore', 'ignore', 'pipe'], windowsVerbatimArguments: true, ...opts })
+      : spawn(cmd, [], { shell: true, stdio: ['ignore', 'ignore', 'pipe'], ...opts })
+    proc.unref()
+
+    let stderr = ''
+    proc.stderr?.on('data', (d) => { stderr += d.toString(isWin ? 'utf16le' : 'utf8') })
+
+    let settled = false
+    const settle = (err) => {
+      if (settled) return
+      settled = true
+      err ? reject(err) : resolve()
+    }
+
+    proc.on('error', (err) => settle(err))
+
+    // 400ms 后仍在运行说明终端已成功打开
+    const timer = setTimeout(() => settle(null), 400)
+
+    proc.on('exit', (code) => {
+      clearTimeout(timer)
+      if (code !== 0) {
+        settle(new Error(stderr.trim() || `进程退出码 ${code}`))
+      } else {
+        settle(null)
+      }
+    })
+  })
+}
+
+// 在新终端窗口中恢复会话，返回 Promise
+function resumeSession(sessionId, cwd, command, terminalApp) {
   const cmd = `${command || 'claude'} --resume ${sessionId}`
   const workDir = cwd && fs.existsSync(cwd) ? cwd : os.homedir()
   const platform = process.platform
+  const app = (terminalApp || 'auto').trim()
+  const isAuto = app === '' || app.toLowerCase() === 'auto'
+
+  if (!isAuto) {
+    const finalCmd = app
+      .replace(/\$\{cc_cmd\}/g, cmd)
+      .replace(/\$\{cwd\}/g, workDir)
+    return spawnDetached(finalCmd, { cwd: workDir })
+  }
+
   if (platform === 'win32') {
-    // Windows: 用 start 开新 cmd 窗口
-    exec(`start cmd /k "${cmd}"`, { cwd: workDir })
+    return spawnDetached(`start cmd /k "${cmd}"`, { cwd: workDir })
   } else if (platform === 'darwin') {
-    // macOS: 用 osascript 打开 Terminal
     const escaped = cmd.replace(/"/g, '\\"')
-    exec(`osascript -e 'tell app "Terminal" to do script "cd ${workDir.replace(/"/g, '\\"')} && ${escaped}"'`)
+    const escapedDir = workDir.replace(/"/g, '\\"')
+    return spawnDetached(`osascript -e 'tell app "Terminal" to do script "cd ${escapedDir} && ${escaped}"'`)
   } else {
-    // Linux: 尝试常见终端
+    // Linux auto: 依次尝试常见终端
     const terminals = ['x-terminal-emulator', 'gnome-terminal', 'konsole', 'xfce4-terminal', 'xterm']
-    for (const term of terminals) {
-      try {
-        if (term === 'gnome-terminal') {
-          exec(`${term} -- bash -c 'cd "${workDir}" && ${cmd}; exec bash'`)
-        } else {
-          exec(`${term} -e 'bash -c "cd \\"${workDir}\\" && ${cmd}; exec bash"'`)
-        }
-        return
-      } catch (e) { continue }
+    const tryNext = (i) => {
+      if (i >= terminals.length) return Promise.reject(new Error('未找到可用终端'))
+      const term = terminals[i]
+      const termCmd = term === 'gnome-terminal'
+        ? `${term} -- bash -c 'cd "${workDir}" && ${cmd}; exec bash'`
+        : `${term} -e 'bash -c "cd \\"${workDir}\\" && ${cmd}; exec bash"'`
+      return spawnDetached(termCmd).catch(() => tryNext(i + 1))
     }
+    return tryNext(0)
   }
 }
 
