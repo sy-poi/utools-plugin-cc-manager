@@ -1857,31 +1857,6 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
   flex-direction: column;
   gap: 6px;
 }
-.scroll-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  border: none;
-  border-radius: 50%;
-  background: rgba(0,0,0,0.08);
-  color: inherit;
-  cursor: pointer;
-  opacity: 0.6;
-  transition: opacity 0.15s, background 0.15s;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.1);
-}
-.scroll-btn:hover {
-  opacity: 1;
-  background: rgba(0,0,0,0.14);
-}
-:global(.dark .scroll-btn) {
-  background: rgba(255,255,255,0.1);
-}
-:global(.dark .scroll-btn:hover) {
-  background: rgba(255,255,255,0.18);
-}
 
 .empty-content, .empty-main {
   display: flex;

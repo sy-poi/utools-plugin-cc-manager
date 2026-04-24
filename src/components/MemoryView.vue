@@ -2,7 +2,38 @@
 import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useSnackbar } from '../composables/useSnackbar'
 import { sideBySideDiff } from '../composables/useDiff'
-import { IconMemory, IconDelete, IconCopy } from './icons'
+import { renderMarkdown } from '../composables/useMarkdown'
+import { IconMemory, IconDelete, IconCopy, IconChevronUp, IconSettings } from './icons'
+
+function escHtml(s) {
+  return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+function renderMemoryContent(text, isIndex = false) {
+  if (!text) return ''
+  const fmMatch = text.match(/^---\r?\n([\s\S]*?)\r?\n---(\r?\n|$)/)
+  let frontmatterHtml = ''
+  let body = text
+  if (fmMatch) {
+    const rows = fmMatch[1].split('\n').map(line => {
+      const m = line.match(/^([^:]+):([\s\S]*)$/)
+      if (m) return `<div class="fm-row"><span class="fm-key">${escHtml(m[1].trim())}</span><span class="fm-colon">: </span><span class="fm-val">${escHtml(m[2].trim())}</span></div>`
+      return `<div class="fm-row fm-plain">${escHtml(line)}</div>`
+    }).join('')
+    frontmatterHtml = `<div class="frontmatter-block">${rows}</div>`
+    body = text.slice(fmMatch[0].length)
+  }
+  let bodyHtml = body ? renderMarkdown(body) : ''
+  if (isIndex) {
+    // 在含有相对 .md 链接的列表项前注入管理按钮
+    bodyHtml = bodyHtml.replace(
+      /(<li>)(<a href="([^"#][^"]*\.md)")/g,
+      (_, openLi, aTag, filename) =>
+        `${openLi}<button class="mem-manage-btn" data-file="${escHtml(filename)}" title="管理此记忆"><span class="mgr-bullet">•</span><svg class="mgr-gear" viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg></button>${aTag}`
+    )
+  }
+  return frontmatterHtml + bodyHtml
+}
 
 const props = defineProps({
   project: Object,
@@ -18,7 +49,116 @@ const edits = reactive({})
 const saving = reactive({})
 const editing = reactive({})
 const textareaRefs = {}
+const fileCardRefs = {}
+const highlightFile = ref(null)
+const memoryFilesRef = ref(null)
+const showBackToTop = ref(false)
 const deleteConfirm = ref(null)
+const manageMenu = ref({ filename: null, style: {} })
+const deleteMemoryConfirm = ref(null) // filename string
+
+// 解析 MEMORY.md 中引用的文件名集合
+const referencedFiles = computed(() => {
+  const memMd = (props.files || []).find(f => f.name === 'MEMORY.md')
+  if (!memMd) return new Set()
+  const s = new Set()
+  const re = /\[.*?\]\(([^)#][^)]*\.md)\)/g
+  let m
+  while ((m = re.exec(edits[memMd.path] || '')) !== null) s.add(m[1])
+  return s
+})
+
+function isReferencedByMemoryMd(filename) {
+  return referencedFiles.value.has(filename)
+}
+
+function onMemoryScroll(e) {
+  showBackToTop.value = e.target.scrollTop > 200
+}
+
+function scrollToTop() {
+  memoryFilesRef.value?.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+function triggerHighlight(name) {
+  highlightFile.value = name
+  setTimeout(() => { highlightFile.value = null }, 1400)
+}
+
+function closeManageMenu() {
+  manageMenu.value.filename = null
+}
+
+function handlePreviewLinkClick(e) {
+  // 管理按钮点击
+  const manageBtn = e.target.closest('.mem-manage-btn')
+  if (manageBtn) {
+    e.preventDefault()
+    e.stopPropagation()
+    const filename = manageBtn.dataset.file
+    if (manageMenu.value.filename === filename) { closeManageMenu(); return }
+    const rect = manageBtn.getBoundingClientRect()
+    manageMenu.value = { filename, style: { left: rect.left + 'px', top: (rect.bottom + 4) + 'px' } }
+    return
+  }
+  // 关闭菜单
+  closeManageMenu()
+  // 相对链接导航
+  const a = e.target.closest('a')
+  if (!a) return
+  const href = a.getAttribute('href')
+  if (!href || href.startsWith('http') || href.startsWith('//') || href.startsWith('#')) return
+  e.preventDefault()
+  const targetName = href.split('/').pop()
+  const el = fileCardRefs[targetName]
+  if (!el) return
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  const container = memoryFilesRef.value
+  if (!container) { triggerHighlight(targetName); return }
+  let scrollTimer = null
+  const onScroll = () => {
+    clearTimeout(scrollTimer)
+    scrollTimer = setTimeout(() => {
+      container.removeEventListener('scroll', onScroll)
+      triggerHighlight(targetName)
+    }, 100)
+  }
+  container.addEventListener('scroll', onScroll)
+  scrollTimer = setTimeout(() => {
+    container.removeEventListener('scroll', onScroll)
+    triggerHighlight(targetName)
+  }, 150)
+}
+
+function openDeleteMemoryConfirm() {
+  const filename = manageMenu.value.filename
+  closeManageMenu()
+  deleteMemoryConfirm.value = filename
+}
+
+function executeDeleteMemory() {
+  const filename = deleteMemoryConfirm.value
+  deleteMemoryConfirm.value = null
+  const memMd = (props.files || []).find(f => f.name === 'MEMORY.md')
+  if (memMd) {
+    // 从 MEMORY.md 中移除引用该文件的行
+    const escaped = filename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const newContent = (edits[memMd.path] || '').replace(
+      new RegExp(`^[^\n]*\\[.*?\\]\\(${escaped}\\)[^\n]*\n?`, 'm'), ''
+    )
+    const saveResult = window.services.saveMemoryFile(memMd.path, newContent)
+    if (!saveResult.success) { showSnackbar('更新 MEMORY.md 失败', 'error'); return }
+    memMd.content = newContent
+    edits[memMd.path] = newContent
+  }
+  const target = (props.files || []).find(f => f.name === filename)
+  if (target) {
+    const result = window.services.deleteMemoryFile(target.path)
+    if (!result.success) { showSnackbar('删除文件失败', 'error'); return }
+  }
+  showSnackbar('已删除')
+  emit('reload')
+}
 
 function autoResize(el) {
   if (!el) return
@@ -47,7 +187,10 @@ function isDirty(file) {
 
 function startEdit(file) {
   editing[file.path] = true
-  nextTick(() => { textareaRefs[file.path]?.focus() })
+  nextTick(() => {
+    const el = textareaRefs[file.path]
+    if (el) { autoResize(el); el.focus() }
+  })
 }
 
 function cancelEdit(file) {
@@ -171,10 +314,12 @@ function copyText(text) {
 onMounted(() => {
   if (props.project) window.services.watchMemoryDir(props.project.path, handleExternalChange)
   document.addEventListener('keydown', onKeyDown)
+  document.addEventListener('click', closeManageMenu)
 })
 onUnmounted(() => {
   window.services.unwatchMemoryDir()
   document.removeEventListener('keydown', onKeyDown)
+  document.removeEventListener('click', closeManageMenu)
 })
 </script>
 
@@ -201,8 +346,13 @@ onUnmounted(() => {
     </div>
 
     <!-- 文件列表 -->
-    <div v-else-if="files && files.length" class="memory-files">
-      <div v-for="file in files" :key="file.path" class="memory-file-card">
+    <div v-else-if="files && files.length" ref="memoryFilesRef" class="memory-files" @scroll="onMemoryScroll">
+      <div
+        v-for="file in files" :key="file.path"
+        :ref="el => { if (el) fileCardRefs[file.name] = el; else delete fileCardRefs[file.name] }"
+        class="memory-file-card"
+        :class="{ 'card-highlight': highlightFile === file.name }"
+      >
         <div class="file-card-header">
           <span class="file-name">{{ file.name }}</span>
           <div class="file-actions">
@@ -216,9 +366,13 @@ onUnmounted(() => {
               >{{ saving[file.path] ? '保存中…' : '保存' }}</button>
             </template>
             <template v-else>
+              <span
+                v-if="file.name !== 'MEMORY.md' && file.name.endsWith('.md') && !isReferencedByMemoryMd(file.name)"
+                class="unreferenced-badge"
+              >无效记忆</span>
               <button class="file-edit-btn" @click="startEdit(file)">修改</button>
               <button
-                v-if="file.name !== 'MEMORY.md'"
+                v-if="file.name !== 'MEMORY.md' && !isReferencedByMemoryMd(file.name)"
                 class="file-delete-btn"
                 @click="deleteConfirm = file"
                 title="删除文件"
@@ -228,12 +382,17 @@ onUnmounted(() => {
             </template>
           </div>
         </div>
+        <div
+          v-if="!editing[file.path]"
+          class="file-preview md-content"
+          v-html="renderMemoryContent(edits[file.path], file.name === 'MEMORY.md')"
+          @click="handlePreviewLinkClick"
+        ></div>
         <textarea
-          :ref="el => { if (el) { textareaRefs[file.path] = el; autoResize(el) } else delete textareaRefs[file.path] }"
+          v-else
+          :ref="el => { if (el) textareaRefs[file.path] = el; else delete textareaRefs[file.path] }"
           class="file-editor"
-          :class="{ readonly: !editing[file.path] }"
           v-model="edits[file.path]"
-          :disabled="!editing[file.path]"
           spellcheck="false"
           @input="autoResize($event.target)"
         ></textarea>
@@ -242,13 +401,31 @@ onUnmounted(() => {
 
     <div v-else class="memory-empty">记忆目录为空</div>
 
-    <!-- 删除文件确认 -->
+    <!-- 返回顶部 -->
+    <Transition name="back-top-fade">
+      <button v-if="showBackToTop" class="scroll-btn back-to-top-btn" @click="scrollToTop" title="返回顶部">
+        <IconChevronUp />
+      </button>
+    </Transition>
+
+    <!-- 删除无效记忆文件确认 -->
     <div v-if="deleteConfirm" class="confirm-overlay" @click.self="deleteConfirm = null">
       <div class="confirm-dialog">
         <p>确认删除 <strong>{{ deleteConfirm.name }}</strong>？</p>
         <div class="confirm-actions">
           <button class="confirm-cancel" @click="deleteConfirm = null">取消</button>
           <button class="confirm-ok danger" @click="confirmDelete">删除</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 从 MEMORY.md 管理删除的确认 -->
+    <div v-if="deleteMemoryConfirm" class="confirm-overlay" @click.self="deleteMemoryConfirm = null">
+      <div class="confirm-dialog">
+        <p>确认删除记忆 <strong>{{ deleteMemoryConfirm }}</strong>？<br><small>将同时从 MEMORY.md 中移除引用并删除对应文件。</small></p>
+        <div class="confirm-actions">
+          <button class="confirm-cancel" @click="deleteMemoryConfirm = null">取消</button>
+          <button class="confirm-ok danger" @click="executeDeleteMemory">删除</button>
         </div>
       </div>
     </div>
@@ -264,6 +441,16 @@ onUnmounted(() => {
       </div>
     </div>
   </div>
+
+  <!-- MEMORY.md 管理下拉菜单（fixed 定位） -->
+  <Transition name="menu-fade">
+    <div v-if="manageMenu.filename" class="mem-manage-menu" :style="manageMenu.style" @click.stop>
+      <button class="mem-manage-menu-item danger" @click="openDeleteMemoryConfirm">
+        <IconDelete :size="13" />
+        <span>删除该记忆</span>
+      </button>
+    </div>
+  </Transition>
 
   <!-- 冲突对话框（fixed，居中于整个视口）-->
   <div v-if="currentConflict" class="conflict-overlay">
@@ -385,6 +572,21 @@ onUnmounted(() => {
 .memory-file-card { border: 1px solid #e0e0e0; border-radius: 8px; }
 :global(.dark .memory-file-card) { border-color: #333; }
 
+@keyframes card-flash {
+  0%, 100% { border-color: #e0e0e0; box-shadow: none; }
+  25%, 75% { border-color: #ff9800; box-shadow: 0 0 0 2px rgba(255,152,0,0.25); }
+}
+@keyframes card-flash-dark {
+  0%, 100% { border-color: #333; box-shadow: none; }
+  25%, 75% { border-color: #ff9800; box-shadow: 0 0 0 2px rgba(255,152,0,0.3); }
+}
+.memory-file-card.card-highlight {
+  animation: card-flash 1.4s ease;
+}
+:global(.dark .memory-file-card.card-highlight) {
+  animation: card-flash-dark 1.4s ease;
+}
+
 .file-card-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 12px;
@@ -427,6 +629,19 @@ onUnmounted(() => {
 :global(.dark .file-save-btn.dirty) { border-color: #90caf9; color: #90caf9; }
 :global(.dark .file-save-btn.dirty:hover) { background: rgba(144,202,249,0.08); }
 
+.unreferenced-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(211,47,47,0.1);
+  color: #d32f2f;
+  white-space: nowrap;
+}
+:global(.dark .unreferenced-badge) {
+  background: rgba(239,154,154,0.12);
+  color: #ef9a9a;
+}
+
 .file-delete-btn {
   display: flex; align-items: center; justify-content: center;
   width: 26px; height: 26px; border: none; background: transparent;
@@ -434,6 +649,38 @@ onUnmounted(() => {
 }
 .file-delete-btn:hover { opacity: 1; color: #d32f2f; background: rgba(211,47,47,0.08); }
 :global(.dark .file-delete-btn:hover) { color: #ef9a9a; background: rgba(239,154,154,0.1); }
+
+.file-preview {
+  padding: 12px 16px;
+  font-size: 13px; line-height: 1.6;
+  background: rgba(0,0,0,0.015);
+  min-height: 60px;
+  max-height: 500px;
+  overflow-y: auto;
+}
+:global(.dark .file-preview) { background: rgba(255,255,255,0.02); }
+
+:global(.file-preview .frontmatter-block) {
+  display: block;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: rgba(0,0,0,0.04);
+  border-left: 3px solid rgba(0,0,0,0.15);
+  border-radius: 0 4px 4px 0;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 12px;
+  line-height: 1.7;
+}
+:global(.dark .file-preview .frontmatter-block) {
+  background: rgba(255,255,255,0.05);
+  border-left-color: rgba(255,255,255,0.2);
+}
+:global(.file-preview .fm-row) { display: flex; gap: 0; }
+:global(.file-preview .fm-key) { color: #6a3f9c; font-weight: 600; white-space: nowrap; }
+:global(.dark .file-preview .fm-key) { color: #ce93d8; }
+:global(.file-preview .fm-colon) { opacity: 0.5; }
+:global(.file-preview .fm-val) { opacity: 0.85; word-break: break-all; }
+:global(.file-preview .fm-plain) { opacity: 0.4; }
 
 .file-editor {
   width: 100%; min-height: 80px; padding: 12px;
@@ -444,12 +691,82 @@ onUnmounted(() => {
   transition: background 0.15s;
   overflow: hidden;
 }
-.file-editor.readonly {
-  resize: none; cursor: default;
-  background: rgba(0,0,0,0.015);
-}
 :global(.dark .file-editor) { color: #e0e0e0; }
-:global(.dark .file-editor.readonly) { background: rgba(255,255,255,0.02); }
+
+.back-to-top-btn {
+  position: absolute;
+  right: 24px;
+  bottom: 24px;
+  z-index: 10;
+}
+.back-top-fade-enter-active, .back-top-fade-leave-active { transition: opacity 0.2s, transform 0.2s; }
+.back-top-fade-enter-from, .back-top-fade-leave-to { opacity: 0; transform: translateY(8px); }
+
+/* MEMORY.md 列表项内联管理按钮 */
+:global(.file-preview li:has(.mem-manage-btn)) { list-style: none; }
+:global(.file-preview ul:has(.mem-manage-btn)) { padding-left: 4px; }
+:global(.file-preview .mem-manage-btn) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border: none;
+  background: transparent;
+  border-radius: 3px;
+  cursor: pointer;
+  color: inherit;
+  vertical-align: middle;
+  margin-left: -2px;
+  margin-right: 4px;
+  padding: 0;
+  transition: background 0.15s;
+}
+/* 默认显示小点，隐藏齿轮 */
+:global(.file-preview .mgr-bullet) { opacity: 0.5; font-size: 14px; line-height: 1; }
+:global(.file-preview .mgr-gear) { display: none; }
+/* 悬浮时切换为齿轮 */
+:global(.file-preview li:hover .mgr-bullet) { display: none; }
+:global(.file-preview li:hover .mgr-gear) { display: inline-flex; opacity: 0.6; }
+:global(.file-preview .mem-manage-btn:hover .mgr-gear) { opacity: 1; }
+:global(.file-preview .mem-manage-btn:hover) { background: rgba(0,0,0,0.07); }
+:global(.dark .file-preview .mem-manage-btn:hover) { background: rgba(255,255,255,0.1); }
+
+.mem-manage-menu {
+  position: fixed;
+  z-index: 9999;
+  background: #fff;
+  border: 1px solid rgba(0,0,0,0.12);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  min-width: 130px;
+  padding: 4px 0;
+}
+:global(.dark .mem-manage-menu) {
+  background: #2a2a2a;
+  border-color: #444;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+.mem-manage-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 14px;
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+  color: inherit;
+}
+.mem-manage-menu-item:hover { background: rgba(0,0,0,0.05); }
+:global(.dark .mem-manage-menu-item:hover) { background: rgba(255,255,255,0.07); }
+.mem-manage-menu-item.danger { color: #d32f2f; }
+:global(.dark .mem-manage-menu-item.danger) { color: #ef9a9a; }
+.menu-fade-enter-active, .menu-fade-leave-active { transition: opacity 0.12s, transform 0.12s; }
+.menu-fade-enter-from, .menu-fade-leave-to { opacity: 0; transform: scale(0.95); }
 
 /* 通用确认弹窗（相对 memory-view 定位） */
 .confirm-overlay {

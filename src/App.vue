@@ -198,10 +198,19 @@ function onMemoryCleared() {
   const name = selectedMemory.value?.name
   selectedMemory.value = null
   memoryFiles.value = []
-  // 更新项目列表中的 hasMemory 状态
   const p = projects.value.find(p => p.name === name)
-  if (p) p.hasMemory = false
+  if (p) { p.hasMemory = false; p.memorySize = 0; p.memoryFileCount = 0 }
 }
+
+// 记忆文件变化时同步更新侧边栏的大小/数量显示
+watch(memoryFiles, (files) => {
+  if (!selectedMemory.value) return
+  const p = projects.value.find(p => p.name === selectedMemory.value.name)
+  if (!p) return
+  p.memoryFileCount = files.length
+  p.memorySize = files.reduce((sum, f) => sum + new Blob([f.content || '']).size, 0)
+  p.hasMemory = files.length > 0
+}, { deep: true })
 
 function selectSession(session) {
   selectedMemory.value = null
