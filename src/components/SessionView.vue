@@ -48,14 +48,48 @@ function onKeyDown(e) {
     closeSearch()
   }
 }
-onMounted(() => document.addEventListener('keydown', onKeyDown))
-onUnmounted(() => document.removeEventListener('keydown', onKeyDown))
-
 const contentBodyRef = ref(null)
+const contentHeaderRef = ref(null)
 const showMoreMenu = ref(false)
 const showShareMenu = ref(false)
 const exportDialog = ref({ show: false, format: '' })
 const showOutline = ref(false)
+// null=从未手动，true=手动开启，false=手动关闭
+const outlineUserOverride = ref(null)
+const OUTLINE_AUTO_WIDTH = 900
+
+function toggleOutline() {
+  showOutline.value = !showOutline.value
+  outlineUserOverride.value = showOutline.value
+}
+
+function onContentResize(width) {
+  if (width >= OUTLINE_AUTO_WIDTH) {
+    if (outlineUserOverride.value !== false) showOutline.value = true
+  } else {
+    if (outlineUserOverride.value !== true) showOutline.value = false
+  }
+}
+
+let outlineResizeObserver = null
+onMounted(() => {
+  document.addEventListener('keydown', onKeyDown)
+  outlineResizeObserver = new ResizeObserver(entries => {
+    onContentResize(entries[0].contentRect.width)
+  })
+})
+onUnmounted(() => {
+  document.removeEventListener('keydown', onKeyDown)
+  outlineResizeObserver?.disconnect()
+})
+
+watch(contentHeaderRef, (el) => {
+  outlineResizeObserver?.disconnect()
+  if (el) {
+    outlineResizeObserver.observe(el)
+    onContentResize(el.offsetWidth)
+  }
+})
 const snapshotDialog = ref({ show: false, item: null, restoring: false, selected: new Set(), step: 1, diffData: [], activeFile: 0 })
 
 function openRestoreDialog(item) {
@@ -432,7 +466,7 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
 
 <template>
   <template v-if="session">
-    <div class="content-header">
+    <div ref="contentHeaderRef" class="content-header">
       <div class="content-header-top">
         <button v-if="!session.isSubagent" class="resume-btn" @click="emit('toggle-favorite', session)" :title="session.isFavorite ? '取消收藏' : '收藏'">
           <IconStar v-if="session.isFavorite" :size="14" style="color: #ff9800" />
@@ -458,7 +492,7 @@ defineExpose({ contentBodyRef, isScrolledToBottom, scrollToEnd })
         <button class="header-action-btn" @click="openSearch" title="搜索 (Ctrl+F)">
           <IconSearch :size="14" />
         </button>
-        <button class="header-action-btn" :class="{ active: showOutline }" @click="showOutline = !showOutline" title="消息大纲">
+        <button class="header-action-btn" :class="{ active: showOutline }" @click="toggleOutline" title="消息大纲">
           <IconList :size="14" />
         </button>
         <div class="more-wrapper">

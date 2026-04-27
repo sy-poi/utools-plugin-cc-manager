@@ -144,6 +144,24 @@ function toggleProject(name, skipLoad = false) {
   }
 }
 
+function onFilterMemoryChange(val) {
+  if (val) {
+    // 开启仅记忆过滤：自动展开有记忆但未展开的项目（不触发会话加载）
+    for (const p of projects.value) {
+      if (p.hasMemory && !expandedProjects.value[p.name]) {
+        expandedProjects.value[p.name] = true
+      }
+    }
+  } else {
+    // 关闭过滤：为已展开但未加载会话的项目触发加载
+    for (const p of projects.value) {
+      if (expandedProjects.value[p.name] && !p.sessionsLoaded && !p.sessionsLoading) {
+        loadProjectSessionsFor(p.name)
+      }
+    }
+  }
+}
+
 function toggleAllProjects() {
   const expand = !projects.value.every(p => expandedProjects.value[p.name])
   for (const p of projects.value) {
@@ -493,6 +511,7 @@ onMounted(() => {
       @open-settings="showSettings = true"
       @open-session-window="openSessionWindow"
       @resume-session="resumeSession"
+      @filter-memory-change="onFilterMemoryChange"
     />
 
     <!-- 侧边栏收起/展开按钮 -->

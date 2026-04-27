@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { IconSettings, IconSearch, IconClose, IconCollapseAll, IconExpandAll, IconRefresh, IconFolder, IconOpenExternal, IconFile, IconEdit, IconDelete, IconSun, IconMoon, IconStar, IconStarOutline, IconCheckbox, IconCheckboxChecked, IconSubagent, IconMore, IconTerminal, IconChat, IconMemory, IconFilter } from './icons'
 import { useTheme } from '../composables/useTheme'
 import { useSnackbar } from '../composables/useSnackbar'
@@ -29,7 +29,8 @@ const emit = defineEmits([
   'open-settings',
   'batch-delete',
   'open-session-window',
-  'resume-session'
+  'resume-session',
+  'filter-memory-change'
 ])
 
 const { isDark, toggleTheme } = useTheme()
@@ -78,6 +79,10 @@ const filterOpen = ref(false)
 const filterMenuStyle = ref({})
 const filterOnlyMemory = ref(false)
 const hasActiveFilter = computed(() => filterOnlyMemory.value)
+
+watch(filterOnlyMemory, (val) => {
+  emit('filter-memory-change', val)
+})
 
 defineExpose({ clearMultiSelect, expandSubagents, filterOnlyMemory })
 
@@ -284,7 +289,7 @@ const filteredProjects = computed(() => {
               <IconMore />
             </button>
           </div>
-          <div v-if="expandedProjects[project.name] || searchQuery?.trim() || filterOnlyMemory" class="session-list">
+          <div v-if="expandedProjects[project.name] || searchQuery?.trim()" class="session-list">
             <!-- 记忆管理固定项（置顶） -->
             <div
               v-if="project.hasMemory"
